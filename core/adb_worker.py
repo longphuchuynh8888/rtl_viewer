@@ -357,14 +357,81 @@ done
         code = self.adb(["shell", "pm", "clear", package])[2]
         self.log(f"{'✓' if code == 0 else '✗'} Clear Cache: {package}")
 
-    def send_text(self, text, press_enter=True):
-        safe = text.replace(" ", "%s").replace("'", "").replace('"', "")
-        self.adb(["shell", "input", "text", safe])
+    def send_text(self, text, press_enter=True, mode="auto", is_password=False):
+        if not text:
+            return
+    
+        if mode == "auto":
+            mode = "char" if is_password else "input"
+    
+        if mode == "adbkeyboard":
+            ok = self.send_text_adbkeyboard(text)
+            if not ok:
+                self.log("⚠ ADB Keyboard thất bại, fallback input text")
+                mode = "input"
+    
+        if mode == "char":
+            self._send_text_char_by_char(text)
+        elif mode == "input":
+            escaped = self._escape_adb_text(text)
+            self.adb(["shell", "input", "text", escaped])
+    
         if press_enter:
             time.sleep(0.15)
             self.adb(["shell", "input", "keyevent", "KEYCODE_ENTER"])
-        self.log(f"✓ Gửi text{' + Enter' if press_enter else ''}: {text[:40]}...")
-
+        self.log(f"✓ Gửi ({mode}): {text[:40]}...")
+    
+    def _escape_adb_text(self, text: str) -> str:
+        mapping = {
+            " ": "%s", "%": "%%", "'": "\\'", '"': '\\"', "\\": "\\\\",
+            "&": "\\&", "<": "\\<", ">": "\\>", "|": "\\|", ";": "\\;",
+            "(": "\\(", ")": "\\)", "#": "\\#", "$": "\\$", "`": "\\`",
+            "!": "\\!", "?": "\\?", "*": "\\*", "~": "\\~",
+        }
+        return "".join(mapping.get(ch, ch) for ch in text)
+    
+    def _send_text_char_by_char(self, text: str) -> bool:
+        key_alias = {
+            "@": "AT", "#": "POUND", "*": "STAR", "/": "SLASH",
+            "\\": "BACKSLASH", ",": "COMMA", ".": "PERIOD",
+            "-": "MINUS", "=": "EQUALS", "+": "PLUS",
+            " ": "SPACE", "\n": "ENTER", "\t": "TAB",
+        }
+        try:
+            for ch in text:
+                if ch in key_alias:
+                    self.adb(["shell", "input", "keyevent", f"KEYCODE_{key_alias[ch]}"])
+                elif ch.isalnum():
+                    self.adb(["shell", "input", "text", ch])
+                else:
+                    self.adb(["shell", "input", "text", self._escape_adb_text(ch)])
+                time.sleep(0.03)
+            return True
+        except Exception:
+            return False
+    
+    def send_text_adbkeyboard(self, text: str) -> bool:
+        # Cần đã cài và bật com.android.adbkeyboard/.AdbIME
+        _, _, code = self.adb([
+            "shell", "am", "broadcast",
+            "-a", "ADB_INPUT_TEXT",
+            "--es", "msg", text
+        ])
+        return code == 0
+    
+    def install_adb_keyboard(self, apk_path):
+        self.install_apk(apk_path)
+        self.enable_adb_keyboard()
+    
+    def enable_adb_keyboard(self):
+        ime = "com.android.adbkeyboard/.AdbIME"
+        self.adb(["shell", "ime", "enable", ime])
+        self.adb(["shell", "ime", "set", ime])
+        self.log("✓ Đã bật ADB Keyboard")
+    
+    def disable_adb_keyboard(self):
+        self.adb(["shell", "ime", "reset"])
+        self.log("✓ Đã trả bàn phím mặc định")
     def install_apk(self, apk_path):
         self.log(f"Đang cài {os.path.basename(apk_path)}...")
         code = self.adb(["install", "-r", apk_path], timeout=120)[2]

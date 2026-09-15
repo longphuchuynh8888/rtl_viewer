@@ -10,7 +10,7 @@ from PyQt5.QtGui import QGuiApplication
 from ui.dialogs import AccountDialog
 from utils.crypto import encrypt_text, decrypt_text
 from utils.storage import load_json, save_json
-
+from PyQt5.QtWidgets import QFileDialog, QComboBox
 ACCOUNTS_FILE = "google_accounts.json"
 
 class AccountTab(QWidget):
@@ -46,7 +46,28 @@ class AccountTab(QWidget):
         self.detail.setWordWrap(True)
         self.detail.setStyleSheet("background:#1a1a1a; padding:8px;")
         layout.addWidget(self.detail)
-
+        mode_box = QGroupBox("Cách gửi text")
+        ml = QVBoxLayout(mode_box)
+        
+        self.combo_send_mode = QComboBox()
+        self.combo_send_mode.addItem("Tự động (mật khẩu = từng ký tự)", "auto")
+        self.combo_send_mode.addItem("ADB input text", "input")
+        self.combo_send_mode.addItem("Từng ký tự", "char")
+        self.combo_send_mode.addItem("ADB Keyboard (broadcast)", "adbkeyboard")
+        ml.addWidget(self.combo_send_mode)
+        
+        kb_row = QHBoxLayout()
+        btn_install_kb = QPushButton("📦 Cài ADB Keyboard")
+        btn_install_kb.clicked.connect(self.install_keyboard)
+        btn_on_kb = QPushButton("▶ Bật ADB Keyboard")
+        btn_on_kb.clicked.connect(lambda: self.worker.enable_adb_keyboard())
+        btn_off_kb = QPushButton("⏹ Trả bàn phím mặc định")
+        btn_off_kb.clicked.connect(lambda: self.worker.disable_adb_keyboard())
+        kb_row.addWidget(btn_install_kb)
+        kb_row.addWidget(btn_on_kb)
+        kb_row.addWidget(btn_off_kb)
+        ml.addLayout(kb_row)
+        layout.addWidget(mode_box)
         send_box = QGroupBox("Gửi / Sao chép")
         sb = QVBoxLayout(send_box)
         for field, label in [
@@ -142,3 +163,24 @@ class AccountTab(QWidget):
         if value:
             QGuiApplication.clipboard().setText(value)
             self.main.status.showMessage(f"Đã sao chép {field}", 2000)
+    def install_keyboard(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Chọn ADBKeyboard.apk", filter="APK (*.apk)")
+        if path:
+            self.worker.install_adb_keyboard(path)
+    
+    def send_field(self, field):
+        if not self.current_account:
+            return
+        value = self.current_account.get(field, "")
+        if field == "password":
+            value = decrypt_text(value)
+        if not value:
+            return
+        mode = self.combo_send_mode.currentData()
+        self.worker.send_text(
+            value,
+            press_enter=True,
+            mode=mode,
+            is_password=(field == "password")
+        )
+        self.main.delayed_refresh()
