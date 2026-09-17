@@ -1,192 +1,147 @@
-# automation/script_runner.py
-"""Chạy kịch bản tự động + hỗ trợ Human-in-the-loop"""
+# automation/vision.py
+"""Nhận diện ảnh + chữ từ screenshot, không dùng UIAutomator / Tesseract"""
 
-import time
-import subprocess
-import os
-from automation.ui_parser import parse_ui_dump
-from automation.learning.action_memory import ActionMemory
-from automation.learning.template_matcher import TemplateMatcher
-from automation.conditions import evaluate_step_conditions
+from PIL import Image, ImageChops
 
-class ScriptRunner:
-    def __init__(self, worker):
-        """
-        worker: instance của ADBWorker
-        """
-        self.worker = worker
-        self.memory = ActionMemory()
-        self.matcher = TemplateMatcher()
+try:
+    import cv2
+    import numpy as np
+    HAS_CV2 = True
+except Exception:
+    HAS_CV2 = False
+    np = None
 
-    def find_and_tap(self, elements, mode, value, long=False):
-        """Tìm phần tử và click. Trả về True nếu thành công."""
-        if mode == "coords":
-            try:
-                x, y = map(int, value.split(","))
-                if long:
-                    self.worker.long_press(x, y)
-                else:
-                    self.worker.tap(x, y)
-                return True
-            except Exception:
-                return False
+try:
+    from rapidocr_onnxruntime import RapidOCR
+    _OCR = RapidOCR()
+    HAS_OCR = True
+except Exception:
+    _OCR = None
+    HAS_OCR = False
 
-        for el in elements:
-            match = False
-            if mode == "text" and el.get("text") == value:
-                match = True
-            elif mode == "resource_id" and el.get("resource_id") == value:
-                match = True
-            elif mode == "content_desc" and el.get("content_desc") == value:
-                match = True
 
-            if match and el.get("cx", 0) > 0:
-                if long:
-                    self.worker.long_press(el["cx"], el["cy"])
-                else:
-                    self.worker.tap(el["cx"], el["cy"])
-                return True
-        return False
+def find_template(screen_img, template_path, threshold=0.72):
+    """Tìm ảnh mẫu trên screenshot. Trả về (cx, cy, score) hoặc None."""
+    if screen_img is None:
+        return None
 
-    def run(self, steps, loop=1, delay_ms=800):
-        worker = self.worker
-        worker.script_running = True
-        count = 0
-    
-        while worker.script_running and (loop <= 0 or count < loop):
-            count += 1
-            worker.log(f"--- Lần chạy {count} ---")
-    
-            worker.dump_ui()
-            time.sleep(0.5)
-    
-            data = worker.adb_out(
-                ["exec-out", "cat", "/data/local/tmp/rtl_screens/window_dump.xml"],
-                8
-            )
-            elements = parse_ui_dump(data.decode(errors="ignore")) if data else []
-    
-            for step in steps:
-                if not worker.script_running:
-                    break
-    
-                action = step.get("action")
-                value = step.get("value", "")
-                mode = step.get("mode", "coords")
-    
-                img = worker.get_screenshot()
-                if not evaluate_step_conditions(
-                    step, elements=elements, img=img, matcher=self.matcher
-                ):
-                    worker.log(f"⏭ Bỏ qua bước (điều kiện chưa thỏa): {value}")
-                    continue
-    
-                if action in ("tap", "long_press"):
-                    ok = self.find_and_tap(
-                        elements, mode, value,
-                        long=(action == "long_press")
-                    )
-                    if ok:
-                        worker.log(f"✓ {action} ({mode}): {value}")
-                    else:
-                        worker.log(f"✗ Không tìm thấy: {value}")
-                        reason = f"Không tìm thấy [{mode}] = {value}"
-                        found = None
-                        try:
-                            found = self.matcher.find(img, reason=reason)
-                        except Exception:
-                            found = None
-    
-                        if found:
-                            x, y, score = found
-                            worker.tap(x, y)
-                            worker.log(f"✓ Template match ({x},{y}) score={score:.2f}")
-                        else:
-                            size = img.size if img else None
-                            sug = self.memory.suggest(reason, current_size=size)
-                            if sug and sug[0] is not None:
-                                worker.tap(sug[0], sug[1])
-                                worker.log(f"✓ Dùng thao tác đã học ({sug[0]},{sug[1]})")
-                            elif worker.help_enabled:
-                                result = worker.request_help(reason)
-                                if result is None or result == "stop":
-                                    worker.script_running = False
-                                    break
-                                elif result == "skip":
-                                    worker.log("⏭ Đã bỏ qua bước")
-                                    continue
-                                elif isinstance(result, tuple) and result[0] == "tap":
-                                    _, x, y = result
-                                    worker.tap(x, y)
-                                    worker.log(f"✓ Người dùng chọn ({x},{y})")
-                            else:
-                                worker.log("⚠ Bỏ qua (tắt hỗ trợ)")
-    
-                elif action == "text":
-                    worker.send_text(value, press_enter=step.get("enter", True))
-    
-                elif action == "key":
-                    worker.adb(["shell", "input", "keyevent", value])
-                    worker.log(f"✓ Key: {value}")
-    
-                elif action == "wait":
-                    try:
-                        time.sleep(float(value) / 1000.0)
-                    except Exception:
-                        time.sleep(0.5)
-                elif action == "run_python":
-                    path = step.get("value") or step.get("python_file")
-                    if path and os.path.exists(path):
-                        worker.log(f"▶ Chạy Python: {path}")
-                        subprocess.run(["python", path], timeout=60)
-                    else:
-                        worker.log(f"✗ Không thấy file Python: {path}")
-                elif action == "swipe":
-                    parts = [p.strip() for p in str(value).split(",")]
-                    if len(parts) >= 4:
-                        dur = parts[4] if len(parts) > 4 else "300"
-                        worker.adb(["shell", "input", "swipe", parts[0], parts[1], parts[2], parts[3], dur])
-                        worker.log(f"✓ Swipe {value}")
-                
-                elif action == "launch":
-                    worker.launch_app(value)
-                elif action == "stop":
-                    worker.force_stop_app(value)
-                elif action == "uninstall":
-                    worker.uninstall_app(value)
-                elif action == "clear":
-                    worker.clear_storage(value)
-                elif action == "unlock":
-                    worker.unlock_swipe_up()
-                    worker.log("✓ Mở khóa")
-                elif action == "rotate":
-                    worker.rotate_screen(int(value or 0))
-                    worker.log(f"✓ Xoay {value}")
-                elif action == "run_python":
-                    if value and os.path.exists(value):
-                        worker.log(f"▶ Chạy Python: {value}")
-                        subprocess.run(["python", value], timeout=60)
-                    else:
-                        worker.log(f"✗ Không thấy file: {value}")
-    			elif action == "find_image":
-    			    pos = find_template(img, value)  # value = đường dẫn template
-    			    if pos:
-    			        worker.tap(pos[0], pos[1])
-    			        worker.log(f"✓ Ảnh mẫu ({pos[0]},{pos[1]}) score={pos[2]:.2f}")
-    			    else:
-    			        worker.log("✗ Không thấy ảnh mẫu")
-    			
-    			elif action == "find_ocr":
-    			    pos = find_text(img, value)
-    			    if pos:
-    			        worker.tap(*pos)
-    			        worker.log(f"✓ OCR '{value}' tại {pos}")
-    			    else:
-    			        worker.log(f"✗ OCR không thấy: {value}")
-                time.sleep(delay_ms / 1000.0)
-    
-            if loop > 0 and count >= loop:
-                break
-    
-        worker.script_running = False
-        worker.log("✓ Kết thúc kịch bản")
+    if HAS_CV2:
+        screen = cv2.cvtColor(np.array(screen_img.convert("RGB")), cv2.COLOR_RGB2BGR)
+        tpl = cv2.imread(template_path)
+        if tpl is None:
+            return None
+        if tpl.shape[0] > screen.shape[0] or tpl.shape[1] > screen.shape[1]:
+            return None
+        res = cv2.matchTemplate(screen, tpl, cv2.TM_CCOEFF_NORMED)
+        _, max_val, _, max_loc = cv2.minMaxLoc(res)
+        if max_val < threshold:
+            return None
+        h, w = tpl.shape[:2]
+        return max_loc[0] + w // 2, max_loc[1] + h // 2, float(max_val)
+
+    return _find_template_pil(screen_img, template_path, threshold)
+
+
+def _find_template_pil(screen_img, template_path, threshold=0.72):
+    """Fallback khi không có OpenCV: quét thô bằng Pillow."""
+    try:
+        tpl = Image.open(template_path).convert("RGB")
+    except Exception:
+        return None
+    screen = screen_img.convert("RGB")
+    sw, sh = screen.size
+    tw, th = tpl.size
+    if tw >= sw or th >= sh:
+        return None
+
+    best = None
+    step = max(4, min(tw, th) // 8)
+    tpl_s = tpl.resize((max(1, tw // 4), max(1, th // 4)))
+    for y in range(0, sh - th, step):
+        for x in range(0, sw - tw, step):
+            crop = screen.crop((x, y, x + tw, y + th)).resize(tpl_s.size)
+            diff = ImageChops.difference(crop, tpl_s).convert("L")
+            avg = sum(diff.getdata()) / float(tpl_s.size[0] * tpl_s.size[1] * 255)
+            score = 1.0 - avg
+            if best is None or score > best[2]:
+                best = (x + tw // 2, y + th // 2, score)
+    if best and best[2] >= threshold:
+        return best
+    return None
+
+
+def find_color(screen_img, rgb, tolerance=30, region=None):
+    """Tìm pixel gần màu target. region=(x1,y1,x2,y2) hoặc cả ảnh."""
+    if screen_img is None:
+        return None
+    img = screen_img.convert("RGB")
+    x1, y1, x2, y2 = region or (0, 0, img.size[0], img.size[1])
+    crop = img.crop((x1, y1, x2, y2))
+    target = tuple(rgb[:3])
+    for y in range(0, crop.size[1], 3):
+        for x in range(0, crop.size[0], 3):
+            p = crop.getpixel((x, y))
+            d = abs(p[0] - target[0]) + abs(p[1] - target[1]) + abs(p[2] - target[2])
+            if d <= tolerance * 3:
+                return x1 + x, y1 + y
+    return None
+
+
+def ocr_text(screen_img, region=None, lang="eng"):
+    """Đọc chữ bằng RapidOCR. Trả về list {text,x,y,w,h,score}."""
+    if not HAS_OCR or screen_img is None:
+        return []
+    img = screen_img.convert("RGB")
+    if region:
+        img = img.crop(region)
+        ox, oy = region[0], region[1]
+    else:
+        ox = oy = 0
+
+    try:
+        import numpy as np
+        result, _ = _OCR(np.array(img))
+    except Exception:
+        return []
+
+    items = []
+    if not result:
+        return items
+    for row in result:
+        try:
+            box, txt, score = row[0], row[1], row[2]
+        except Exception:
+            continue
+        if not txt or float(score) < 0.4:
+            continue
+        xs = [p[0] for p in box]
+        ys = [p[1] for p in box]
+        x1, y1, x2, y2 = min(xs), min(ys), max(xs), max(ys)
+        items.append({
+            "text": str(txt),
+            "x": int(ox + (x1 + x2) / 2),
+            "y": int(oy + (y1 + y2) / 2),
+            "w": int(x2 - x1),
+            "h": int(y2 - y1),
+            "score": float(score),
+        })
+    return items
+
+
+def find_text(screen_img, needle, region=None, lang="eng"):
+    """Tìm chữ (không phân biệt hoa thường). Trả về (x, y) hoặc None."""
+    needle = (needle or "").strip().lower()
+    if not needle:
+        return None
+    for item in ocr_text(screen_img, region=region, lang=lang):
+        if needle in item["text"].lower():
+            return item["x"], item["y"]
+    return None
+
+
+def vision_status():
+    return {
+        "opencv": HAS_CV2,
+        "ocr": HAS_OCR,
+        "ocr_engine": "rapidocr" if HAS_OCR else None,
+    }
