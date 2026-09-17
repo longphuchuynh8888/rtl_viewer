@@ -8,6 +8,7 @@ from automation.ui_parser import parse_ui_dump
 from automation.learning.action_memory import ActionMemory
 from automation.learning.template_matcher import TemplateMatcher
 from automation.conditions import evaluate_step_conditions
+
 class ScriptRunner:
     def __init__(self, worker):
         """
@@ -167,7 +168,21 @@ class ScriptRunner:
                         subprocess.run(["python", value], timeout=60)
                     else:
                         worker.log(f"✗ Không thấy file: {value}")
-    
+    			elif action == "find_image":
+    			    pos = find_template(img, value)  # value = đường dẫn template
+    			    if pos:
+    			        worker.tap(pos[0], pos[1])
+    			        worker.log(f"✓ Ảnh mẫu ({pos[0]},{pos[1]}) score={pos[2]:.2f}")
+    			    else:
+    			        worker.log("✗ Không thấy ảnh mẫu")
+    			
+    			elif action == "find_ocr":
+    			    pos = find_text(img, value)
+    			    if pos:
+    			        worker.tap(*pos)
+    			        worker.log(f"✓ OCR '{value}' tại {pos}")
+    			    else:
+    			        worker.log(f"✗ OCR không thấy: {value}")
                 time.sleep(delay_ms / 1000.0)
     
             if loop > 0 and count >= loop:
