@@ -1,20 +1,18 @@
 # ui/tabs/automation_tab.py
-"""Tab Tự động hoá UI + Human-in-the-loop + Kịch bản"""
+"""Tab Tự động hoá UI + Human-in-the-loop + nhiều kịch bản"""
 
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QPushButton,
     QLabel, QComboBox, QLineEdit, QListWidget, QListWidgetItem,
-    QSpinBox, QCheckBox, QFileDialog, QMessageBox
+    QSpinBox, QCheckBox, QMessageBox, QInputDialog
 )
 from PyQt5.QtCore import Qt
 import threading
-import os
 
-from utils.storage import load_json, save_json
 from ui.dialogs import ConditionDialog
 from ui.action_dialog import ActionDialog
-SCRIPT_DIR = "ui_scripts"
-os.makedirs(SCRIPT_DIR, exist_ok=True)
+from automation.script_store import ScriptStore
+
 
 class AutomationTab(QWidget):
     def __init__(self, main_window):
@@ -23,12 +21,14 @@ class AutomationTab(QWidget):
         self.worker = main_window.worker
         self.ui_elements = []
         self.script_steps = []
+        self.store = ScriptStore()
+        self.current_script_name = None
         self._build_ui()
+        self.reload_script_lib()
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
 
-        # Bật/tắt Human-in-the-loop
         self.chk_help = QCheckBox("Bật hỗ trợ khi kẹt (Human-in-the-loop)")
         self.chk_help.setChecked(True)
         self.chk_help.stateChanged.connect(
@@ -36,7 +36,6 @@ class AutomationTab(QWidget):
         )
         layout.addWidget(self.chk_help)
 
-        # Chế độ click
         mode_row = QHBoxLayout()
         mode_row.addWidget(QLabel("Chế độ click:"))
         self.combo_click_mode = QComboBox()
@@ -47,7 +46,6 @@ class AutomationTab(QWidget):
         mode_row.addWidget(self.combo_click_mode)
         layout.addLayout(mode_row)
 
-        # Dump UI
         btn_dump = QPushButton("📥 Dump UI Hierarchy")
         btn_dump.clicked.connect(
             lambda: threading.Thread(target=self.worker.dump_ui, daemon=True).start()
@@ -60,7 +58,7 @@ class AutomationTab(QWidget):
         layout.addWidget(self.ui_search)
 
         self.ui_list = QListWidget()
-        self.ui_list.setMaximumHeight(140)
+        self.ui_list.setMaximumHeight(110)
         layout.addWidget(self.ui_list)
 
         ui_btn = QHBoxLayout()
@@ -70,26 +68,55 @@ class AutomationTab(QWidget):
         btn_long.clicked.connect(self.long_selected)
         btn_add = QPushButton("➕ Thêm vào kịch bản")
         btn_add.clicked.connect(self.add_to_script)
+        btn_add_action = QPushButton("➕ Thêm hành động")
+        btn_add_action.clicked.connect(self.add_action)
         ui_btn.addWidget(btn_click)
         ui_btn.addWidget(btn_long)
         ui_btn.addWidget(btn_add)
+        ui_btn.addWidget(btn_add_action)
         layout.addLayout(ui_btn)
 
-        # Kịch bản
-        script_box = QGroupBox("Kịch bản hành động")
+        lib_box = QGroupBox("Danh sách kịch bản")
+        ll = QVBoxLayout(lib_box)
+        self.script_lib = QListWidget()
+        self.script_lib.setMaximumHeight(90)
+        self.script_lib.itemClicked.connect(self.on_script_selected)
+        ll.addWidget(self.script_lib)
+
+        lib_btn = QHBoxLayout()
+        btn_new = QPushButton("➕ Mới")
+        btn_new.clicked.connect(self.new_script)
+        btn_rename = QPushButton("✏️ Đổi tên")
+        btn_rename.clicked.connect(self.rename_script)
+        btn_del_script = QPushButton("🗑 Xóa kịch bản")
+        btn_del_script.clicked.connect(self.delete_script)
+        lib_btn.addWidget(btn_new)
+        lib_btn.addWidget(btn_rename)
+        lib_btn.addWidget(btn_del_script)
+        ll.addLayout(lib_btn)
+        layout.addWidget(lib_box)
+
+        script_box = QGroupBox("Các bước của kịch bản đang chọn")
         sb = QVBoxLayout(script_box)
 
+        self.lbl_current = QLabel("Chưa chọn kịch bản")
+        sb.addWidget(self.lbl_current)
+
         self.script_list = QListWidget()
-        self.script_list.setMaximumHeight(120)
+        self.script_list.setMaximumHeight(110)
+        self.script_list.itemClicked.connect(self.show_step_conditions)
         sb.addWidget(self.script_list)
 
         ctrl_row = QHBoxLayout()
         btn_del = QPushButton("🗑 Xóa bước")
         btn_del.clicked.connect(self.delete_step)
-        btn_clear = QPushButton("Clear")
+        btn_clear = QPushButton("Clear bước")
         btn_clear.clicked.connect(self.clear_script)
+        btn_save = QPushButton("💾 Lưu")
+        btn_save.clicked.connect(self.save_script)
         ctrl_row.addWidget(btn_del)
         ctrl_row.addWidget(btn_clear)
+        ctrl_row.addWidget(btn_save)
         sb.addLayout(ctrl_row)
 
         run_row = QHBoxLayout()
@@ -115,20 +142,8 @@ class AutomationTab(QWidget):
         run_btn.addWidget(btn_stop)
         sb.addLayout(run_btn)
 
-        save_row = QHBoxLayout()
-        btn_save = QPushButton("💾 Lưu kịch bản")
-        btn_save.clicked.connect(self.save_script)
-        btn_load = QPushButton("📂 Tải kịch bản")
-        btn_load.clicked.connect(self.load_script)
-        save_row.addWidget(btn_save)
-        save_row.addWidget(btn_load)
-        sb.addLayout(save_row)
-
-        layout.addWidget(script_box)
-        layout.addStretch()
         cond_box = QGroupBox("Điều kiện của bước đang chọn")
         cl = QVBoxLayout(cond_box)
-        
         logic_row = QHBoxLayout()
         logic_row.addWidget(QLabel("Kết hợp:"))
         self.combo_logic = QComboBox()
@@ -137,11 +152,11 @@ class AutomationTab(QWidget):
         self.combo_logic.currentIndexChanged.connect(self.update_step_logic)
         logic_row.addWidget(self.combo_logic)
         cl.addLayout(logic_row)
-        
+
         self.cond_list = QListWidget()
-        self.cond_list.setMaximumHeight(80)
+        self.cond_list.setMaximumHeight(70)
         cl.addWidget(self.cond_list)
-        
+
         cond_btn = QHBoxLayout()
         btn_add_cond = QPushButton("➕ Thêm điều kiện")
         btn_add_cond.clicked.connect(self.add_condition)
@@ -150,14 +165,11 @@ class AutomationTab(QWidget):
         cond_btn.addWidget(btn_add_cond)
         cond_btn.addWidget(btn_del_cond)
         cl.addLayout(cond_btn)
-        
         sb.addWidget(cond_box)
-        self.script_list.itemClicked.connect(self.show_step_conditions)
-        btn_add_action = QPushButton("➕ Thêm hành động")
-        btn_add_action.clicked.connect(self.add_action)
-        ui_btn.addWidget(btn_add_action)
 
-    # ---------- UI Elements ----------
+        layout.addWidget(script_box)
+        layout.addStretch()
+
     def fill_elements(self, elements):
         self.ui_elements = elements
         self.filter_elements()
@@ -195,12 +207,13 @@ class AutomationTab(QWidget):
         self.main.delayed_refresh()
 
     def add_to_script(self):
+        if not self._ensure_script():
+            return
         item = self.ui_list.currentItem()
         if not item:
             return
         el = item.data(Qt.UserRole)
         mode = self.combo_click_mode.currentData()
-
         if mode == "coords":
             value = f"{el['cx']},{el['cy']}"
         elif mode == "text":
@@ -209,35 +222,43 @@ class AutomationTab(QWidget):
             value = el.get("resource_id", "")
         else:
             value = el.get("content_desc", "")
-
         if not value:
             QMessageBox.information(self, "Thông báo", f"Phần tử không có {mode}")
             return
-
-        self.script_steps.append({
-            "action": "tap",
-            "mode": mode,
-            "value": value
-        })
+        self.script_steps.append({"action": "tap", "mode": mode, "value": value})
         self.refresh_script_list()
+        self._persist_current()
 
-    # ---------- Script ----------
+    def add_action(self):
+        if not self._ensure_script():
+            return
+        packages = getattr(self.main, "all_packages", [])
+        dlg = ActionDialog(self, packages=packages)
+        if dlg.exec_() == ActionDialog.Accepted:
+            self.script_steps.append(dlg.get_step())
+            self.refresh_script_list()
+            self._persist_current()
+
     def refresh_script_list(self):
         self.script_list.clear()
         for i, s in enumerate(self.script_steps):
             self.script_list.addItem(
-                f"{i+1}. {s['action']} ({s.get('mode', '')}) = {s.get('value', '')}"
+                f"{i+1}. {s.get('action')} ({s.get('mode', '')}) = {s.get('value', '')}"
             )
+        name = self.current_script_name or "Chưa chọn kịch bản"
+        self.lbl_current.setText(f"Đang chọn: {name}")
 
     def delete_step(self):
         row = self.script_list.currentRow()
         if row >= 0:
             self.script_steps.pop(row)
             self.refresh_script_list()
+            self._persist_current()
 
     def clear_script(self):
         self.script_steps.clear()
         self.refresh_script_list()
+        self._persist_current()
 
     def run_script(self):
         if not self.script_steps:
@@ -245,32 +266,87 @@ class AutomationTab(QWidget):
             return
         from automation.script_runner import ScriptRunner
         runner = ScriptRunner(self.worker)
-        loop = self.spin_loop.value()
-        delay = self.spin_delay.value()
         threading.Thread(
             target=runner.run,
-            args=(self.script_steps, loop, delay),
+            args=(self.script_steps, self.spin_loop.value(), self.spin_delay.value()),
             daemon=True
         ).start()
 
     def save_script(self):
-        if not self.script_steps:
+        if not self._ensure_script():
             return
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Lưu kịch bản", SCRIPT_DIR, "JSON (*.json)"
-        )
-        if path:
-            save_json(path, self.script_steps)
-            self.main.append_log(f"✓ Đã lưu: {os.path.basename(path)}")
+        self.store.put(self.current_script_name, self.script_steps)
+        self.main.append_log(f"✓ Đã lưu: {self.current_script_name}")
 
-    def load_script(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Tải kịch bản", SCRIPT_DIR, "JSON (*.json)"
+    def reload_script_lib(self):
+        self.script_lib.clear()
+        for name in self.store.names():
+            self.script_lib.addItem(name)
+
+    def _persist_current(self):
+        if self.current_script_name:
+            self.store.put(self.current_script_name, self.script_steps)
+
+    def _ensure_script(self):
+        if self.current_script_name:
+            return True
+        QMessageBox.information(self, "Thông báo", "Hãy tạo hoặc chọn một kịch bản trước")
+        return False
+
+    def on_script_selected(self, item):
+        self._persist_current()
+        name = item.text()
+        self.current_script_name = name
+        self.script_steps = list(self.store.get(name) or [])
+        self.refresh_script_list()
+        self.cond_list.clear()
+        self.main.append_log(f"Đang dùng kịch bản: {name}")
+
+    def new_script(self):
+        name, ok = QInputDialog.getText(self, "Kịch bản mới", "Tên:")
+        name = (name or "").strip()
+        if not ok or not name:
+            return
+        if name in self.store.names():
+            QMessageBox.information(self, "Thông báo", "Tên đã tồn tại")
+            return
+        self._persist_current()
+        self.current_script_name = name
+        self.script_steps = []
+        self.store.put(name, self.script_steps)
+        self.reload_script_lib()
+        self.refresh_script_list()
+
+    def rename_script(self):
+        if not self.current_script_name:
+            return
+        name, ok = QInputDialog.getText(
+            self, "Đổi tên", "Tên mới:", text=self.current_script_name
         )
-        if path:
-            self.script_steps = load_json(path, [])
-            self.refresh_script_list()
-            self.main.append_log(f"✓ Đã tải: {os.path.basename(path)}")
+        name = (name or "").strip()
+        if not ok or not name or name == self.current_script_name:
+            return
+        steps = self.script_steps
+        self.store.delete(self.current_script_name)
+        self.store.put(name, steps)
+        self.current_script_name = name
+        self.reload_script_lib()
+        self.refresh_script_list()
+
+    def delete_script(self):
+        if not self.current_script_name:
+            return
+        if QMessageBox.question(
+            self, "Xác nhận", f"Xóa kịch bản {self.current_script_name}?"
+        ) != QMessageBox.Yes:
+            return
+        self.store.delete(self.current_script_name)
+        self.current_script_name = None
+        self.script_steps = []
+        self.reload_script_lib()
+        self.refresh_script_list()
+        self.cond_list.clear()
+
     def show_step_conditions(self):
         row = self.script_list.currentRow()
         self.cond_list.clear()
@@ -283,13 +359,14 @@ class AutomationTab(QWidget):
             self.combo_logic.setCurrentIndex(idx)
         for c in step.get("conditions", []):
             self.cond_list.addItem(str(c))
-    
+
     def update_step_logic(self):
         row = self.script_list.currentRow()
         if row < 0:
             return
         self.script_steps[row]["logic"] = self.combo_logic.currentData()
-    
+        self._persist_current()
+
     def add_condition(self):
         row = self.script_list.currentRow()
         if row < 0:
@@ -297,10 +374,10 @@ class AutomationTab(QWidget):
             return
         dlg = ConditionDialog(self, ui_elements=self.ui_elements)
         if dlg.exec_() == ConditionDialog.Accepted:
-            cond = dlg.get_data()
-            self.script_steps[row].setdefault("conditions", []).append(cond)
+            self.script_steps[row].setdefault("conditions", []).append(dlg.get_data())
             self.show_step_conditions()
-    
+            self._persist_current()
+
     def delete_condition(self):
         row = self.script_list.currentRow()
         crow = self.cond_list.currentRow()
@@ -308,9 +385,4 @@ class AutomationTab(QWidget):
             return
         self.script_steps[row]["conditions"].pop(crow)
         self.show_step_conditions()
-    def add_action(self):
-        packages = getattr(self.main, "all_packages", [])
-        dlg = ActionDialog(self, packages=packages)
-        if dlg.exec_() == ActionDialog.Accepted:
-            self.script_steps.append(dlg.get_step())
-            self.refresh_script_list()
+        self._persist_current()

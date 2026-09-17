@@ -8,9 +8,9 @@ from datetime import datetime
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QPushButton,
     QLabel, QCheckBox, QSpinBox, QComboBox, QStatusBar, QTabWidget,
-    QFileDialog, QInputDialog, QMessageBox
+    QFileDialog, QInputDialog, QMessageBox, QSplitter, QTextEdit
 )
-from PyQt5.QtCore import QTimer
+from PyQt5.QtCore import Qt, QTimer
 
 from core.adb_worker import ADBWorker
 from ui.screen_label import ScreenLabel
@@ -20,12 +20,13 @@ from ui.tabs.app_tab import AppTab
 from ui.tabs.automation_tab import AutomationTab
 from automation.human_loop import HelpDialog
 from automation.learning.action_memory import ActionMemory
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Samsung RTL Viewer - Modular")
         self.resize(1400, 960)
-
         self.setStyleSheet("""
             QMainWindow { background-color: #0d0d0d; }
             QGroupBox { color: #ddd; border: 1px solid #333; margin-top: 6px; padding-top: 8px; font-weight: bold; }
@@ -43,18 +44,42 @@ class MainWindow(QMainWindow):
             QTabBar::tab { background: #2a2a2a; color: #ccc; padding: 8px 12px; }
             QTabBar::tab:selected { background: #0a84ff; color: white; }
         """)
+
         self.memory = ActionMemory()
         self.worker = ADBWorker()
         self.all_packages = []
 
+        self.screen = ScreenLabel(self)
+        self.control_tab = ControlTab(self)
+        self.account_tab = AccountTab(self)
+        self.app_tab = AppTab(self)
+        self.automation_tab = AutomationTab(self)
+
+        self._build_ui()
+        self._connect_signals()
+        self._start_loops()
+
+    def _build_ui(self):
         central = QWidget()
         self.setCentralWidget(central)
-        root = QHBoxLayout(central)
+        root = QVBoxLayout(central)
+        root.setContentsMargins(8, 8, 8, 8)
 
-        # ===== Cột trái: Màn hình =====
-        left = QVBoxLayout()
-        self.screen = ScreenLabel(self)
-        left.addWidget(self.screen)
+        top = QHBoxLayout()
+        self.btn_toggle_screen = QPushButton("👁 Ẩn màn hình thiết bị")
+        self.btn_toggle_screen.setCheckable(True)
+        self.btn_toggle_screen.setChecked(True)
+        self.btn_toggle_screen.clicked.connect(self.toggle_screen)
+        top.addWidget(self.btn_toggle_screen)
+        top.addStretch()
+        root.addLayout(top)
+
+        self.splitter = QSplitter(Qt.Horizontal)
+
+        self.screen_panel = QWidget()
+        left = QVBoxLayout(self.screen_panel)
+        left.setContentsMargins(0, 0, 0, 0)
+        left.addWidget(self.screen, 1)
 
         quick = QHBoxLayout()
         btn_rf = QPushButton("🔄 Refresh")
@@ -99,26 +124,36 @@ class MainWindow(QMainWindow):
             b.clicked.connect(lambda _, k=key: self.send_key(k))
             keys.addWidget(b)
         left.addLayout(keys)
-        root.addLayout(left, 3)
+        self.splitter.addWidget(self.screen_panel)
 
-        # ===== Cột phải: Tabs =====
         self.tabs = QTabWidget()
-        root.addWidget(self.tabs, 2)
-
-        self.control_tab = ControlTab(self)
-        self.account_tab = AccountTab(self)
-        self.app_tab = AppTab(self)
-        self.automation_tab = AutomationTab(self)
-
         self.tabs.addTab(self.control_tab, "Điều khiển")
         self.tabs.addTab(self.account_tab, "Tài khoản Google")
         self.tabs.addTab(self.app_tab, "Ứng dụng")
         self.tabs.addTab(self.automation_tab, "Tự động hoá UI")
+        self.splitter.addWidget(self.tabs)
+
+        self.splitter.setStretchFactor(0, 3)
+        self.splitter.setStretchFactor(1, 2)
+        root.addWidget(self.splitter, 3)
+
+        log_head = QHBoxLayout()
+        log_head.addWidget(QLabel("Nhật ký"))
+        btn_clear_log = QPushButton("Xóa log")
+        btn_clear_log.clicked.connect(lambda: self.log.clear())
+        log_head.addStretch()
+        log_head.addWidget(btn_clear_log)
+        root.addLayout(log_head)
+
+        self.log = QTextEdit()
+        self.log.setReadOnly(True)
+        self.log.setMaximumHeight(180)
+        root.addWidget(self.log)
 
         self.status = QStatusBar()
         self.setStatusBar(self.status)
 
-        # Kết nối signal
+    def _connect_signals(self):
         self.worker.screenshot_ready.connect(self.on_new_frame)
         self.worker.status_message.connect(self.status.showMessage)
         self.worker.log_message.connect(self.append_log)
@@ -128,7 +163,7 @@ class MainWindow(QMainWindow):
         self.worker.ui_elements_ready.connect(self.automation_tab.fill_elements)
         self.worker.need_help.connect(self.on_need_help)
 
-        # Khởi động vòng lặp ảnh
+    def _start_loops(self):
         threading.Thread(target=self.worker.start_loop, daemon=True).start()
         QTimer.singleShot(1000, self.manual_refresh)
         QTimer.singleShot(
@@ -136,7 +171,13 @@ class MainWindow(QMainWindow):
             lambda: threading.Thread(target=self.worker.get_device_info, daemon=True).start()
         )
 
-    # ---------- Human-in-the-loop ----------
+    def toggle_screen(self):
+        visible = self.btn_toggle_screen.isChecked()
+        self.screen_panel.setVisible(visible)
+        self.btn_toggle_screen.setText(
+            "👁 Ẩn màn hình thiết bị" if visible else "👁 Hiện màn hình thiết bị"
+        )
+
     def on_need_help(self, img, reason):
         dlg = HelpDialog(img, reason, self, memory=self.memory)
         dlg.coordinate_chosen.connect(
@@ -145,11 +186,9 @@ class MainWindow(QMainWindow):
         dlg.skip_step.connect(lambda: self.worker.set_help_result("skip"))
         dlg.stop_script.connect(lambda: self.worker.set_help_result("stop"))
         dlg.exec_()
-    # ---------- Log & Info ----------
+
     def append_log(self, text):
-        self.control_tab.log.append(
-            f"[{datetime.now().strftime('%H:%M:%S')}] {text}"
-        )
+        self.log.append(f"[{datetime.now().strftime('%H:%M:%S')}] {text}")
 
     def show_device_info(self, info):
         self.control_tab.info_label.setText(
@@ -162,7 +201,6 @@ class MainWindow(QMainWindow):
     def show_screen_text(self, text):
         self.control_tab.screen_text_view.setPlainText(text)
 
-    # ---------- Packages ----------
     def reload_device_packages(self):
         pkg_type = self.control_tab.combo_pkg_type.currentData()
         self.worker.list_packages(pkg_type)
@@ -198,7 +236,6 @@ class MainWindow(QMainWindow):
                 self.worker.uninstall_app(pkg)
                 QTimer.singleShot(1200, self.reload_device_packages)
 
-    # ---------- File ----------
     def do_push_file(self):
         path, _ = QFileDialog.getOpenFileName(self, "Chọn file gửi lên thiết bị")
         if path:
@@ -216,7 +253,6 @@ class MainWindow(QMainWindow):
                 target=self.worker.pull_file, args=(remote,), daemon=True
             ).start()
 
-    # ---------- Ảnh & Input ----------
     def change_quality(self):
         self.worker.quality = self.combo_quality.currentData()
         self.worker.force_next = True
