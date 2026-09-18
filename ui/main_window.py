@@ -1,5 +1,5 @@
 # ui/main_window.py
-"""Cửa sổ chính – kết nối tất cả tab và worker"""
+"""Cua so chinh"""
 
 import subprocess
 import threading
@@ -8,11 +8,16 @@ from datetime import datetime
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QPushButton,
     QLabel, QCheckBox, QSpinBox, QComboBox, QStatusBar, QTabWidget,
-    QFileDialog, QInputDialog, QMessageBox, QSplitter, QTextEdit
+    QFileDialog, QInputDialog, QMessageBox, QSplitter, QTextEdit,
+    QApplication
 )
 from PyQt5.QtCore import Qt, QTimer
 
 from core.adb_worker import ADBWorker
+from core.aws_relay import AwsRelay
+from core.device_store import DeviceStore
+from core.url_store import UrlStore
+from core.http_hub import HubServer, HUB
 from ui.screen_label import ScreenLabel
 from ui.tabs.control_tab import ControlTab
 from ui.tabs.account_tab import AccountTab
@@ -20,12 +25,11 @@ from ui.tabs.app_tab import AppTab
 from ui.tabs.automation_tab import AutomationTab
 from automation.human_loop import HelpDialog
 from automation.learning.action_memory import ActionMemory
-from core.http_hub import HubServer, HUB
 
 
 class MainWindow(QMainWindow):
     def __init__(self):
-        super().__init__()
+        super(MainWindow, self).__init__()
         self.setWindowTitle("Samsung RTL Viewer - Modular")
         self.resize(1400, 960)
         self.setStyleSheet("""
@@ -48,6 +52,11 @@ class MainWindow(QMainWindow):
 
         self.memory = ActionMemory()
         self.worker = ADBWorker()
+        self.relay = AwsRelay("")
+        self.device_store = DeviceStore()
+        self.url_store = UrlStore()
+        self.transport = "adb"
+        self.aws_serial = ""
         self.all_packages = []
 
         self.screen = ScreenLabel(self)
@@ -67,34 +76,75 @@ class MainWindow(QMainWindow):
         root.setContentsMargins(8, 8, 8, 8)
 
         top = QHBoxLayout()
-        self.btn_toggle_screen = QPushButton("👁 Ẩn màn hình thiết bị")
+        self.btn_toggle_screen = QPushButton("An/Hien man hinh")
         self.btn_toggle_screen.setCheckable(True)
         self.btn_toggle_screen.setChecked(True)
         self.btn_toggle_screen.clicked.connect(self.toggle_screen)
         top.addWidget(self.btn_toggle_screen)
+
+        top.addWidget(QLabel("Kenh:"))
+        self.combo_transport = QComboBox()
+        self.combo_transport.addItem("ADB (1 may)", "adb")
+        self.combo_transport.addItem("HTTP Hub", "http")
+        self.combo_transport.addItem("AWS Lambda", "aws")
+        self.combo_transport.addItem("Thu muc / Terabox", "folder")
+        self.combo_transport.currentIndexChanged.connect(self.on_transport_changed)
+        top.addWidget(self.combo_transport)
+
+        btn_http = QPushButton("Start HTTP + adb reverse")
+        btn_http.clicked.connect(self.start_http_hub)
+        top.addWidget(btn_http)
+
+        top.addWidget(QLabel("Function URL:"))
+        self.combo_aws_url = QComboBox()
+        self.combo_aws_url.setMinimumWidth(200)
+        self.combo_aws_url.currentIndexChanged.connect(self.on_url_chosen)
+        top.addWidget(self.combo_aws_url)
+
+        btn_url_add = QPushButton("Them URL")
+        btn_url_add.clicked.connect(self.add_aws_url)
+        btn_url_edit = QPushButton("Sua URL")
+        btn_url_edit.clicked.connect(self.edit_aws_url)
+        btn_url_del = QPushButton("Xoa URL")
+        btn_url_del.clicked.connect(self.delete_aws_url)
+        top.addWidget(btn_url_add)
+        top.addWidget(btn_url_edit)
+        top.addWidget(btn_url_del)
+
+        top.addWidget(QLabel("May:"))
+        self.combo_device = QComboBox()
+        self.combo_device.setMinimumWidth(220)
+        self.combo_device.currentIndexChanged.connect(self.on_device_chosen)
+        top.addWidget(self.combo_device)
+
+        btn_add_dev = QPushButton("Them serial")
+        btn_add_dev.clicked.connect(self.add_device_manual)
+        btn_copy = QPushButton("Chep serial")
+        btn_copy.clicked.connect(self.copy_serial)
+        top.addWidget(btn_add_dev)
+        top.addWidget(btn_copy)
         top.addStretch()
         root.addLayout(top)
 
         self.splitter = QSplitter(Qt.Horizontal)
-
         self.screen_panel = QWidget()
         left = QVBoxLayout(self.screen_panel)
         left.setContentsMargins(0, 0, 0, 0)
         left.addWidget(self.screen, 1)
 
         quick = QHBoxLayout()
-        btn_rf = QPushButton("🔄 Refresh")
+        btn_rf = QPushButton("Refresh")
         btn_rf.clicked.connect(self.manual_refresh)
         quick.addWidget(btn_rf)
 
-        self.chk_auto = QCheckBox("Tự làm mới")
+        self.chk_auto = QCheckBox("Tu lam moi")
         self.chk_auto.setChecked(True)
         self.chk_auto.stateChanged.connect(
             lambda s: setattr(self.worker, "auto_refresh", bool(s))
         )
         quick.addWidget(self.chk_auto)
 
-        quick.addWidget(QLabel("Giây:"))
+        quick.addWidget(QLabel("Giay:"))
         self.spin = QSpinBox()
         self.spin.setRange(1, 30)
         self.spin.setValue(2)
@@ -103,11 +153,11 @@ class MainWindow(QMainWindow):
         )
         quick.addWidget(self.spin)
 
-        quick.addWidget(QLabel("Chất lượng:"))
+        quick.addWidget(QLabel("Chat luong:"))
         self.combo_quality = QComboBox()
         self.combo_quality.addItem("Cao", 1.0)
-        self.combo_quality.addItem("Trung bình", 0.5)
-        self.combo_quality.addItem("Thấp", 0.3)
+        self.combo_quality.addItem("Trung binh", 0.5)
+        self.combo_quality.addItem("Thap", 0.3)
         self.combo_quality.setCurrentIndex(1)
         self.combo_quality.currentIndexChanged.connect(self.change_quality)
         quick.addWidget(self.combo_quality)
@@ -116,10 +166,10 @@ class MainWindow(QMainWindow):
 
         keys = QHBoxLayout()
         for text, key in [
-            ("◀ Back", "KEYCODE_BACK"),
-            ("● Home", "KEYCODE_HOME"),
-            ("■ Recent", "KEYCODE_APP_SWITCH"),
-            ("⏻ Power", "KEYCODE_POWER"),
+            ("Back", "KEYCODE_BACK"),
+            ("Home", "KEYCODE_HOME"),
+            ("Recent", "KEYCODE_APP_SWITCH"),
+            ("Power", "KEYCODE_POWER"),
         ]:
             b = QPushButton(text)
             b.clicked.connect(lambda _, k=key: self.send_key(k))
@@ -128,31 +178,18 @@ class MainWindow(QMainWindow):
         self.splitter.addWidget(self.screen_panel)
 
         self.tabs = QTabWidget()
-        self.tabs.addTab(self.control_tab, "Điều khiển")
-        self.tabs.addTab(self.account_tab, "Tài khoản Google")
-        self.tabs.addTab(self.app_tab, "Ứng dụng")
-        self.tabs.addTab(self.automation_tab, "Tự động hoá UI")
+        self.tabs.addTab(self.control_tab, "Dieu khien")
+        self.tabs.addTab(self.account_tab, "Tai khoan Google")
+        self.tabs.addTab(self.app_tab, "Ung dung")
+        self.tabs.addTab(self.automation_tab, "Tu dong hoa UI")
         self.splitter.addWidget(self.tabs)
-
         self.splitter.setStretchFactor(0, 3)
         self.splitter.setStretchFactor(1, 2)
         root.addWidget(self.splitter, 3)
 
-        top.addWidget(QLabel("Kênh:"))
-        self.combo_transport = QComboBox()
-        self.combo_transport.addItem("ADB (1 máy)", "adb")
-        self.combo_transport.addItem("HTTP Hub", "http")
-        self.combo_transport.addItem("Google Drive (sau)", "gdrive")
-        self.combo_transport.addItem("Thư mục chia sẻ / Tegrabox (sau)", "folder")
-        top.addWidget(self.combo_transport)
-        
-        btn_http = QPushButton("Start HTTP + adb reverse")
-        btn_http.clicked.connect(self.start_http_hub)
-        top.addWidget(btn_http)
-        
         log_head = QHBoxLayout()
-        log_head.addWidget(QLabel("Nhật ký"))
-        btn_clear_log = QPushButton("Xóa log")
+        log_head.addWidget(QLabel("Nhat ky"))
+        btn_clear_log = QPushButton("Xoa log")
         btn_clear_log.clicked.connect(lambda: self.log.clear())
         log_head.addStretch()
         log_head.addWidget(btn_clear_log)
@@ -165,6 +202,113 @@ class MainWindow(QMainWindow):
 
         self.status = QStatusBar()
         self.setStatusBar(self.status)
+        self.reload_device_combo()
+        self.reload_url_combo()
+
+    def reload_device_combo(self):
+        current = self.aws_serial
+        self.combo_device.blockSignals(True)
+        self.combo_device.clear()
+        for serial in self.device_store.serials():
+            self.combo_device.addItem(self.device_store.label(serial), serial)
+        self.combo_device.blockSignals(False)
+        idx = self.combo_device.findData(current)
+        if idx >= 0:
+            self.combo_device.setCurrentIndex(idx)
+        elif self.combo_device.count():
+            self.on_device_chosen()
+
+    def reload_url_combo(self):
+        current = self.combo_aws_url.currentData()
+        self.combo_aws_url.blockSignals(True)
+        self.combo_aws_url.clear()
+        for name in self.url_store.names():
+            url = self.url_store.get(name)
+            self.combo_aws_url.addItem("%s | %s" % (name, url[:32]), name)
+        self.combo_aws_url.blockSignals(False)
+        if current:
+            idx = self.combo_aws_url.findData(current)
+            if idx >= 0:
+                self.combo_aws_url.setCurrentIndex(idx)
+        self.on_url_chosen()
+
+    def on_device_chosen(self):
+        self.aws_serial = self.combo_device.currentData() or ""
+        if self.aws_serial:
+            self.append_log("Chon may: " + self.aws_serial)
+
+    def on_url_chosen(self):
+        name = self.combo_aws_url.currentData()
+        url = self.url_store.get(name) if name else ""
+        self.relay = AwsRelay(url)
+        if url:
+            self.append_log("URL: " + name)
+
+    def add_device_manual(self):
+        serial, ok = QInputDialog.getText(self, "Them may", "Serial:")
+        if not ok or not (serial or "").strip():
+            return
+        name, ok2 = QInputDialog.getText(self, "Them may", "Ten may:", text=serial.strip())
+        self.device_store.upsert(serial.strip(), name=(name.strip() if ok2 else serial.strip()))
+        self.reload_device_combo()
+        idx = self.combo_device.findData(serial.strip())
+        if idx >= 0:
+            self.combo_device.setCurrentIndex(idx)
+
+    def copy_serial(self):
+        serial = self.combo_device.currentData() or self.aws_serial or ""
+        if not serial:
+            self.append_log("Chua chon may")
+            return
+        QApplication.clipboard().setText(serial)
+        self.append_log("Da chep serial: " + serial)
+
+    def add_aws_url(self):
+        name, ok = QInputDialog.getText(self, "Them Function URL", "Ten:")
+        if not ok or not name.strip():
+            return
+        url, ok2 = QInputDialog.getText(self, "Them Function URL", "URL:")
+        if not ok2 or not url.strip():
+            return
+        self.url_store.upsert(name.strip(), url.strip())
+        self.reload_url_combo()
+        idx = self.combo_aws_url.findData(name.strip())
+        if idx >= 0:
+            self.combo_aws_url.setCurrentIndex(idx)
+
+    def edit_aws_url(self):
+        name = self.combo_aws_url.currentData()
+        if not name:
+            return
+        url, ok = QInputDialog.getText(self, "Sua URL", "URL:", text=self.url_store.get(name))
+        if not ok:
+            return
+        new_name, ok2 = QInputDialog.getText(self, "Sua URL", "Ten:", text=name)
+        if not ok2:
+            return
+        if new_name.strip() != name:
+            self.url_store.delete(name)
+        self.url_store.upsert(new_name.strip(), url.strip())
+        self.reload_url_combo()
+
+    def delete_aws_url(self):
+        name = self.combo_aws_url.currentData()
+        if not name:
+            return
+        if QMessageBox.question(self, "Xoa", "Xoa %s?" % name) != QMessageBox.Yes:
+            return
+        self.url_store.delete(name)
+        self.reload_url_combo()
+
+    def apply_aws_settings(self):
+        self.on_url_chosen()
+        self.aws_serial = self.combo_device.currentData() or ""
+
+    def on_transport_changed(self):
+        self.transport = self.combo_transport.currentData()
+        self.append_log("Kenh: " + str(self.transport))
+        if self.transport == "aws":
+            self.apply_aws_settings()
 
     def _connect_signals(self):
         self.worker.screenshot_ready.connect(self.on_new_frame)
@@ -185,11 +329,7 @@ class MainWindow(QMainWindow):
         )
 
     def toggle_screen(self):
-        visible = self.btn_toggle_screen.isChecked()
-        self.screen_panel.setVisible(visible)
-        self.btn_toggle_screen.setText(
-            "👁 Ẩn màn hình thiết bị" if visible else "👁 Hiện màn hình thiết bị"
-        )
+        self.screen_panel.setVisible(self.btn_toggle_screen.isChecked())
 
     def on_need_help(self, img, reason):
         dlg = HelpDialog(img, reason, self, memory=self.memory)
@@ -201,22 +341,37 @@ class MainWindow(QMainWindow):
         dlg.exec_()
 
     def append_log(self, text):
-        self.log.append(f"[{datetime.now().strftime('%H:%M:%S')}] {text}")
+        self.log.append("[%s] %s" % (datetime.now().strftime("%H:%M:%S"), text))
 
     def show_device_info(self, info):
+        serial = info.get("Serial") or ""
+        name = ("%s %s" % (info.get("Manufacturer", ""), info.get("Model", ""))).strip()
+        if serial:
+            self.device_store.upsert(
+                serial,
+                name=name,
+                country=info.get("Country", "-"),
+                ip=info.get("Public IP", "-"),
+            )
+            self.reload_device_combo()
+            idx = self.combo_device.findData(serial)
+            if idx >= 0:
+                self.combo_device.setCurrentIndex(idx)
         self.control_tab.info_label.setText(
-            f"<b>{info.get('Manufacturer', '')} {info.get('Model', '')}</b><br>"
-            f"Android: {info.get('Android', '—')}<br>"
-            f"Serial: {info.get('Serial', '—')}<br>"
-            f"IP: {info.get('Public IP', '—')} | {info.get('Country', '—')}"
+            "<b>%s</b><br>Android: %s<br>Serial: %s<br>IP: %s | %s" % (
+                name,
+                info.get("Android", "-"),
+                serial or "-",
+                info.get("Public IP", "-"),
+                info.get("Country", "-"),
+            )
         )
 
     def show_screen_text(self, text):
         self.control_tab.screen_text_view.setPlainText(text)
 
     def reload_device_packages(self):
-        pkg_type = self.control_tab.combo_pkg_type.currentData()
-        self.worker.list_packages(pkg_type)
+        self.worker.list_packages(self.control_tab.combo_pkg_type.currentData())
 
     def fill_packages(self, packages):
         self.all_packages = packages
@@ -245,39 +400,30 @@ class MainWindow(QMainWindow):
         item = self.control_tab.pkg_list.currentItem()
         if item:
             pkg = item.text()
-            if QMessageBox.question(self, "Xác nhận", f"Gỡ {pkg}?") == QMessageBox.Yes:
+            if QMessageBox.question(self, "Xac nhan", "Go %s?" % pkg) == QMessageBox.Yes:
                 self.worker.uninstall_app(pkg)
                 QTimer.singleShot(1200, self.reload_device_packages)
 
     def do_push_file(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Chọn file gửi lên thiết bị")
+        path, _ = QFileDialog.getOpenFileName(self, "Chon file")
         if path:
-            threading.Thread(
-                target=self.worker.push_file, args=(path,), daemon=True
-            ).start()
+            threading.Thread(target=self.worker.push_file, args=(path,), daemon=True).start()
 
     def do_pull_file(self):
-        remote, ok = QInputDialog.getText(
-            self, "Lấy file", "Đường dẫn trên thiết bị:",
-            text="/sdcard/Download/"
-        )
+        remote, ok = QInputDialog.getText(self, "Lay file", "Duong dan:", text="/sdcard/Download/")
         if ok and remote:
-            threading.Thread(
-                target=self.worker.pull_file, args=(remote,), daemon=True
-            ).start()
+            threading.Thread(target=self.worker.pull_file, args=(remote,), daemon=True).start()
 
     def change_quality(self):
         self.worker.quality = self.combo_quality.currentData()
-        self.worker.force_next = True
         self.manual_refresh()
 
     def delayed_refresh(self):
         self.worker.force_next = True
-        QTimer.singleShot(700, self.manual_refresh)
+        QTimer.singleShot(900, self.manual_refresh)
 
     def do_rotate(self, orientation):
         self.worker.rotate_screen(orientation)
-        self.worker.force_next = True
         QTimer.singleShot(1300, self.manual_refresh)
 
     def on_new_frame(self, img):
@@ -286,13 +432,24 @@ class MainWindow(QMainWindow):
 
     def manual_refresh(self):
         self.worker.force_next = True
+        self.apply_aws_settings()
 
         def _do():
-            img = self.worker.get_screenshot_live()
+            img = None
+            if self.transport == "aws":
+                img = self.relay.get_shot(self.aws_serial)
+            elif self.transport == "http":
+                serials = HUB.serials()
+                img = HUB.get_shot(serials[0]) if serials else None
+            else:
+                img = self.worker.get_screenshot_live()
             if img:
                 self.worker.last_image = img.copy()
+                self.worker.last_device_size = img.size
                 self.worker.save_local(img)
                 self.worker.screenshot_ready.emit(img)
+            elif self.transport == "aws":
+                self.worker.log_message.emit("AWS: khong tai duoc anh")
 
         threading.Thread(target=_do, daemon=True).start()
 
@@ -303,29 +460,39 @@ class MainWindow(QMainWindow):
             pass
 
     def send_tap(self, x, y):
-        self.adb_cmd(["shell", "input", "tap", str(x), str(y)])
+        if self.transport == "aws":
+            self.apply_aws_settings()
+            ok = self.relay.push_cmd(
+                self.aws_serial, {"action": "tap", "x": int(x), "y": int(y)}
+            )
+            self.append_log("AWS tap %s,%s %s" % (x, y, "ok" if ok else "fail"))
+        elif self.transport == "http":
+            serials = HUB.serials()
+            if serials:
+                HUB.push_cmd(serials[0], {"action": "tap", "x": int(x), "y": int(y)})
+        else:
+            self.adb_cmd(["shell", "input", "tap", str(int(x)), str(int(y))])
         self.delayed_refresh()
 
     def send_swipe(self, x1, y1, x2, y2, d=300):
-        self.adb_cmd(["shell", "input", "swipe",
-                      str(x1), str(y1), str(x2), str(y2), str(d)])
+        self.adb_cmd(["shell", "input", "swipe", str(x1), str(y1), str(x2), str(y2), str(d)])
         self.delayed_refresh()
 
     def send_long_press(self, x, y, d=900):
-        self.adb_cmd(["shell", "input", "swipe",
-                      str(x), str(y), str(x), str(y), str(d)])
+        self.adb_cmd(["shell", "input", "swipe", str(x), str(y), str(x), str(y), str(d)])
         self.delayed_refresh()
 
     def send_key(self, key):
         self.adb_cmd(["shell", "input", "keyevent", key])
         self.delayed_refresh()
 
-    def closeEvent(self, event):
-        self.worker.stop()
-        event.accept()
     def start_http_hub(self):
         if not hasattr(self, "hub"):
             self.hub = HubServer(8765)
         self.hub.start()
         self.worker.adb(["reverse", "tcp:8765", "tcp:8765"])
-        self.append_log("✓ HTTP Hub :8765 + adb reverse")
+        self.append_log("HTTP Hub :8765 + adb reverse")
+
+    def closeEvent(self, event):
+        self.worker.stop()
+        event.accept()
