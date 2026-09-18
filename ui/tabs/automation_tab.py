@@ -35,7 +35,14 @@ class AutomationTab(QWidget):
             lambda s: setattr(self.worker, "help_enabled", bool(s))
         )
         layout.addWidget(self.chk_help)
-
+        engine_row = QHBoxLayout()
+        engine_row.addWidget(QLabel("Công cụ nhận diện:"))
+        self.combo_engine = QComboBox()
+        self.combo_engine.addItem("UIAutomator (app thường)", "uiautomator")
+        self.combo_engine.addItem("Hình ảnh / OCR (game)", "vision")
+        engine_row.addWidget(self.combo_engine)
+        layout.addLayout(engine_row)
+		
         mode_row = QHBoxLayout()
         mode_row.addWidget(QLabel("Chế độ click:"))
         self.combo_click_mode = QComboBox()
@@ -266,12 +273,12 @@ class AutomationTab(QWidget):
             return
         from automation.script_runner import ScriptRunner
         runner = ScriptRunner(self.worker)
+        runner.engine = self.combo_engine.currentData()
         threading.Thread(
             target=runner.run,
             args=(self.script_steps, self.spin_loop.value(), self.spin_delay.value()),
             daemon=True
         ).start()
-
     def save_script(self):
         if not self._ensure_script():
             return

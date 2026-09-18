@@ -9,13 +9,11 @@ import os
 import tempfile
 import urllib.request
 import json
-import re
 from datetime import datetime
 
 from PyQt5.QtCore import QObject, pyqtSignal
 from PIL import Image, ImageChops
 
-# Đường dẫn trên thiết bị
 DEVICE_DIR = "/data/local/tmp/rtl_screens"
 DEVICE_LATEST = f"{DEVICE_DIR}/latest.jpg"
 DEVICE_TEXT = f"{DEVICE_DIR}/screen_text.txt"
@@ -36,25 +34,25 @@ class ADBWorker(QObject):
     device_info_ready = pyqtSignal(dict)
     screen_text_ready = pyqtSignal(str)
     ui_elements_ready = pyqtSignal(list)
-    need_help = pyqtSignal(object, str)  # img, reason
+    need_help = pyqtSignal(object, str)
 
     def __init__(self):
         super().__init__()
         self.running = True
         self.auto_refresh = True
         self.interval = 1.8
-        self.mode = "service"          # service | adb
+        self.mode = "service"
         self.auto_unlock = False
         self.quality = 0.5
         self.jpeg_quality = 40
         self.change_threshold = 8.0
         self.last_image = None
+        self.last_device_size = (1080, 2340)
         self.force_next = False
         self.script_running = False
         self.help_enabled = True
         self._help_result = None
 
-    # -------------------- ADB cơ bản --------------------
     def adb(self, args, timeout=15):
         try:
             r = subprocess.run(["adb"] + args, capture_output=True, timeout=timeout)
@@ -69,7 +67,6 @@ class ADBWorker(QObject):
     def log(self, msg: str):
         self.log_message.emit(msg)
 
-    # -------------------- Thông tin thiết bị --------------------
     def get_resolution(self):
         out = self.adb_out(["shell", "wm", "size"], 6)
         if out:
@@ -102,7 +99,6 @@ class ADBWorker(QObject):
             pass
         return img
 
-    # -------------------- Screenshot --------------------
     def take_screenshot_service_pull(self):
         try:
             with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
@@ -141,15 +137,21 @@ class ADBWorker(QObject):
                 pass
         return None
 
-    def get_screenshot(self):
+    def get_screenshot_full(self):
+        """Ảnh gốc, không resize — dùng so khớp và tap game."""
         if self.mode == "service":
             img = (self.take_screenshot_service_pull()
                    or self.take_screenshot_service_cat()
                    or self.take_screenshot_adb())
         else:
             img = self.take_screenshot_adb()
-
         img = self.correct_orientation(img)
+        if img:
+            self.last_device_size = img.size
+        return img
+
+    def get_screenshot(self):
+        img = self.get_screenshot_full()
         if img and self.quality < 1.0:
             w, h = img.size
             img = img.resize(
@@ -205,7 +207,6 @@ class ADBWorker(QObject):
         self.running = False
         self.script_running = False
 
-    # -------------------- Service --------------------
     def install_service(self):
         script = f'''#!/system/bin/sh
 DIR="{DEVICE_DIR}"
@@ -284,7 +285,6 @@ done
         else:
             self.screen_text_ready.emit("(Chưa có dữ liệu)")
 
-    # -------------------- UI Dump --------------------
     def dump_ui(self):
         self.adb(["shell", "uiautomator", "dump", DEVICE_DUMP], timeout=10)
         data = self.adb_out(["exec-out", "cat", DEVICE_DUMP], 10)
@@ -297,12 +297,12 @@ done
         self.log(f"✓ Dump UI: {len(elements)} phần tử")
 
     def tap(self, x, y):
-        self.adb(["shell", "input", "tap", str(x), str(y)])
+        self.adb(["shell", "input", "tap", str(int(x)), str(int(y))])
 
     def long_press(self, x, y, duration=800):
-        self.adb(["shell", "input", "swipe", str(x), str(y), str(x), str(y), str(duration)])
+        self.adb(["shell", "input", "swipe",
+                  str(int(x)), str(int(y)), str(int(x)), str(int(y)), str(duration)])
 
-    # -------------------- File --------------------
     def push_file(self, local_path, remote_path=None):
         if not remote_path:
             remote_path = f"/sdcard/Download/{os.path.basename(local_path)}"
@@ -315,7 +315,6 @@ done
         code = self.adb(["pull", remote_path, local_path], timeout=60)[2]
         self.log(f"{'✓' if code == 0 else '✗'} Lấy file: {remote_path}")
 
-    # -------------------- Packages --------------------
     def list_packages(self, pkg_type="user"):
         cmd = ["shell", "pm", "list", "packages"] if pkg_type == "all" else ["shell", "pm", "list", "packages", "-3"]
         out = self.adb_out(cmd, 25)
@@ -360,27 +359,23 @@ done
     def send_text(self, text, press_enter=True, mode="auto", is_password=False):
         if not text:
             return
-    
         if mode == "auto":
             mode = "char" if is_password else "input"
-    
         if mode == "adbkeyboard":
             ok = self.send_text_adbkeyboard(text)
             if not ok:
                 self.log("⚠ ADB Keyboard thất bại, fallback input text")
                 mode = "input"
-    
         if mode == "char":
             self._send_text_char_by_char(text)
         elif mode == "input":
             escaped = self._escape_adb_text(text)
             self.adb(["shell", "input", "text", escaped])
-    
         if press_enter:
             time.sleep(0.15)
             self.adb(["shell", "input", "keyevent", "KEYCODE_ENTER"])
         self.log(f"✓ Gửi ({mode}): {text[:40]}...")
-    
+
     def _escape_adb_text(self, text: str) -> str:
         mapping = {
             " ": "%s", "%": "%%", "'": "\\'", '"': '\\"', "\\": "\\\\",
@@ -389,7 +384,7 @@ done
             "!": "\\!", "?": "\\?", "*": "\\*", "~": "\\~",
         }
         return "".join(mapping.get(ch, ch) for ch in text)
-    
+
     def _send_text_char_by_char(self, text: str) -> bool:
         key_alias = {
             "@": "AT", "#": "POUND", "*": "STAR", "/": "SLASH",
@@ -409,29 +404,29 @@ done
             return True
         except Exception:
             return False
-    
+
     def send_text_adbkeyboard(self, text: str) -> bool:
-        # Cần đã cài và bật com.android.adbkeyboard/.AdbIME
         _, _, code = self.adb([
             "shell", "am", "broadcast",
             "-a", "ADB_INPUT_TEXT",
             "--es", "msg", text
         ])
         return code == 0
-    
+
     def install_adb_keyboard(self, apk_path):
         self.install_apk(apk_path)
         self.enable_adb_keyboard()
-    
+
     def enable_adb_keyboard(self):
         ime = "com.android.adbkeyboard/.AdbIME"
         self.adb(["shell", "ime", "enable", ime])
         self.adb(["shell", "ime", "set", ime])
         self.log("✓ Đã bật ADB Keyboard")
-    
+
     def disable_adb_keyboard(self):
         self.adb(["shell", "ime", "reset"])
         self.log("✓ Đã trả bàn phím mặc định")
+
     def install_apk(self, apk_path):
         self.log(f"Đang cài {os.path.basename(apk_path)}...")
         code = self.adb(["install", "-r", apk_path], timeout=120)[2]
@@ -492,13 +487,11 @@ done
                 pass
         self.device_info_ready.emit(info)
 
-    # -------------------- Human-in-the-loop --------------------
     def request_help(self, reason="Không tìm thấy phần tử"):
         self.log(f"⚠ Cần hỗ trợ: {reason}")
-        img = self.get_screenshot() or self.take_screenshot_adb()
+        img = self.get_screenshot_full() or self.take_screenshot_adb()
         self._help_result = None
         self.need_help.emit(img, reason)
-
         waited = 0
         while self._help_result is None and self.script_running and waited < 120:
             time.sleep(0.4)

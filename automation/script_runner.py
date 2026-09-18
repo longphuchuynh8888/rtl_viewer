@@ -1,147 +1,228 @@
-# automation/vision.py
-"""Nhận diện ảnh + chữ từ screenshot, không dùng UIAutomator / Tesseract"""
+# automation/script_runner.py
+"""Chạy kịch bản: UIAutomator hoặc Hình ảnh/OCR"""
 
-from PIL import Image, ImageChops
+import os
+import time
+import subprocess
 
-try:
-    import cv2
-    import numpy as np
-    HAS_CV2 = True
-except Exception:
-    HAS_CV2 = False
-    np = None
-
-try:
-    from rapidocr_onnxruntime import RapidOCR
-    _OCR = RapidOCR()
-    HAS_OCR = True
-except Exception:
-    _OCR = None
-    HAS_OCR = False
+from automation.ui_parser import parse_ui_dump
+from automation.conditions import evaluate_step_conditions
+from automation.learning.action_memory import ActionMemory
+from automation.learning.template_matcher import TemplateMatcher
+from automation.vision import find_template, find_text, find_color
 
 
-def find_template(screen_img, template_path, threshold=0.72):
-    """Tìm ảnh mẫu trên screenshot. Trả về (cx, cy, score) hoặc None."""
-    if screen_img is None:
-        return None
+class ScriptRunner:
+    def __init__(self, worker):
+        self.worker = worker
+        self.memory = ActionMemory()
+        self.matcher = TemplateMatcher()
+        self.engine = "uiautomator"
 
-    if HAS_CV2:
-        screen = cv2.cvtColor(np.array(screen_img.convert("RGB")), cv2.COLOR_RGB2BGR)
-        tpl = cv2.imread(template_path)
-        if tpl is None:
-            return None
-        if tpl.shape[0] > screen.shape[0] or tpl.shape[1] > screen.shape[1]:
-            return None
-        res = cv2.matchTemplate(screen, tpl, cv2.TM_CCOEFF_NORMED)
-        _, max_val, _, max_loc = cv2.minMaxLoc(res)
-        if max_val < threshold:
-            return None
-        h, w = tpl.shape[:2]
-        return max_loc[0] + w // 2, max_loc[1] + h // 2, float(max_val)
+    def _device_size(self, img):
+        worker = self.worker
+        size = getattr(worker, "last_device_size", None)
+        if size and size[0] > 0 and size[1] > 0:
+            return size
+        if img is not None:
+            return img.size
+        return (1, 1)
 
-    return _find_template_pil(screen_img, template_path, threshold)
+    def _tap_from_image(self, img, x, y, long=False):
+        """Đổi tọa độ trên ảnh screenshot sang tọa độ thiết bị rồi tap."""
+        dw, dh = self._device_size(img)
+        iw, ih = img.size if img is not None else (dw, dh)
+        if iw <= 0 or ih <= 0:
+            nx, ny = int(x), int(y)
+        else:
+            nx = int(x * dw / iw)
+            ny = int(y * dh / ih)
+        if long:
+            self.worker.long_press(nx, ny)
+        else:
+            self.worker.tap(nx, ny)
+        self.worker.log(f"✓ Tap thiết bị ({nx},{ny}) từ ảnh ({int(x)},{int(y)}) size={iw}x{ih} → {dw}x{dh}")
 
+    def find_and_tap(self, elements, mode, value, long=False):
+        if mode == "coords":
+            try:
+                x, y = map(int, value.split(","))
+                if long:
+                    self.worker.long_press(x, y)
+                else:
+                    self.worker.tap(x, y)
+                return True
+            except Exception:
+                return False
 
-def _find_template_pil(screen_img, template_path, threshold=0.72):
-    """Fallback khi không có OpenCV: quét thô bằng Pillow."""
-    try:
-        tpl = Image.open(template_path).convert("RGB")
-    except Exception:
-        return None
-    screen = screen_img.convert("RGB")
-    sw, sh = screen.size
-    tw, th = tpl.size
-    if tw >= sw or th >= sh:
-        return None
+        for el in elements or []:
+            match = False
+            if mode == "text" and el.get("text") == value:
+                match = True
+            elif mode == "resource_id" and el.get("resource_id") == value:
+                match = True
+            elif mode == "content_desc" and el.get("content_desc") == value:
+                match = True
+            if match and el.get("cx", 0) > 0:
+                if long:
+                    self.worker.long_press(el["cx"], el["cy"])
+                else:
+                    self.worker.tap(el["cx"], el["cy"])
+                return True
+        return False
 
-    best = None
-    step = max(4, min(tw, th) // 8)
-    tpl_s = tpl.resize((max(1, tw // 4), max(1, th // 4)))
-    for y in range(0, sh - th, step):
-        for x in range(0, sw - tw, step):
-            crop = screen.crop((x, y, x + tw, y + th)).resize(tpl_s.size)
-            diff = ImageChops.difference(crop, tpl_s).convert("L")
-            avg = sum(diff.getdata()) / float(tpl_s.size[0] * tpl_s.size[1] * 255)
-            score = 1.0 - avg
-            if best is None or score > best[2]:
-                best = (x + tw // 2, y + th // 2, score)
-    if best and best[2] >= threshold:
-        return best
-    return None
+    def run(self, steps, loop=1, delay_ms=800):
+        worker = self.worker
+        worker.script_running = True
+        count = 0
 
+        while worker.script_running and (loop <= 0 or count < loop):
+            count += 1
+            worker.log(f"--- Lần chạy {count} | engine={self.engine} ---")
 
-def find_color(screen_img, rgb, tolerance=30, region=None):
-    """Tìm pixel gần màu target. region=(x1,y1,x2,y2) hoặc cả ảnh."""
-    if screen_img is None:
-        return None
-    img = screen_img.convert("RGB")
-    x1, y1, x2, y2 = region or (0, 0, img.size[0], img.size[1])
-    crop = img.crop((x1, y1, x2, y2))
-    target = tuple(rgb[:3])
-    for y in range(0, crop.size[1], 3):
-        for x in range(0, crop.size[0], 3):
-            p = crop.getpixel((x, y))
-            d = abs(p[0] - target[0]) + abs(p[1] - target[1]) + abs(p[2] - target[2])
-            if d <= tolerance * 3:
-                return x1 + x, y1 + y
-    return None
+            elements = []
+            if self.engine == "uiautomator":
+                worker.dump_ui()
+                time.sleep(0.5)
+                data = worker.adb_out(
+                    ["exec-out", "cat", "/data/local/tmp/rtl_screens/window_dump.xml"],
+                    8
+                )
+                elements = parse_ui_dump(data.decode(errors="ignore")) if data else []
+            else:
+                worker.log("Chế độ Hình ảnh/OCR — bỏ qua UIAutomator")
 
+            for step in steps:
+                if not worker.script_running:
+                    break
 
-def ocr_text(screen_img, region=None, lang="eng"):
-    """Đọc chữ bằng RapidOCR. Trả về list {text,x,y,w,h,score}."""
-    if not HAS_OCR or screen_img is None:
-        return []
-    img = screen_img.convert("RGB")
-    if region:
-        img = img.crop(region)
-        ox, oy = region[0], region[1]
-    else:
-        ox = oy = 0
+                action = step.get("action")
+                value = step.get("value", "")
+                mode = step.get("mode", "coords")
+                img = worker.get_screenshot()
 
-    try:
-        import numpy as np
-        result, _ = _OCR(np.array(img))
-    except Exception:
-        return []
+                if not evaluate_step_conditions(
+                    step, elements=elements, img=img, matcher=self.matcher
+                ):
+                    worker.log(f"⏭ Bỏ qua (điều kiện chưa thỏa): {value}")
+                    continue
 
-    items = []
-    if not result:
-        return items
-    for row in result:
+                if action in ("tap", "long_press"):
+                    if self.engine == "vision" and mode in ("text", "content_desc"):
+                        pos = find_text(img, value)
+                        if pos:
+                            self._tap_from_image(img, pos[0], pos[1], long=(action == "long_press"))
+                        else:
+                            worker.log(f"✗ OCR không thấy: {value}")
+                    else:
+                        ok = self.find_and_tap(
+                            elements, mode, value, long=(action == "long_press")
+                        )
+                        if ok:
+                            worker.log(f"✓ {action} ({mode}): {value}")
+                        else:
+                            self._handle_miss(worker, img, mode, value)
+
+                elif action == "find_image":
+                    pos = find_template(img, value)
+                    if pos:
+                        worker.log(f"Ảnh mẫu score={pos[2]:.2f}")
+                        self._tap_from_image(img, pos[0], pos[1])
+                    else:
+                        worker.log(f"✗ Không thấy ảnh mẫu: {value}")
+
+                elif action == "find_ocr":
+                    pos = find_text(img, value)
+                    if pos:
+                        self._tap_from_image(img, pos[0], pos[1])
+                    else:
+                        worker.log(f"✗ OCR không thấy: {value}")
+
+                elif action == "find_color":
+                    try:
+                        parts = [p.strip() for p in str(value).split(",")]
+                        rgb = [int(parts[0]), int(parts[1]), int(parts[2])]
+                    except Exception:
+                        worker.log(f"✗ RGB không hợp lệ: {value}")
+                        rgb = None
+                    pos = find_color(img, rgb) if rgb else None
+                    if pos:
+                        self._tap_from_image(img, pos[0], pos[1])
+                    elif rgb:
+                        worker.log(f"✗ Không thấy màu {rgb}")
+
+                elif action == "swipe":
+                    parts = [p.strip() for p in str(value).split(",")]
+                    if len(parts) >= 4:
+                        dur = parts[4] if len(parts) > 4 else "300"
+                        worker.adb(["shell", "input", "swipe",
+                                    parts[0], parts[1], parts[2], parts[3], dur])
+                        worker.log(f"✓ Swipe {value}")
+
+                elif action == "text":
+                    worker.send_text(value, press_enter=step.get("enter", True))
+                elif action == "key":
+                    worker.adb(["shell", "input", "keyevent", value])
+                    worker.log(f"✓ Key: {value}")
+                elif action == "launch":
+                    worker.launch_app(value)
+                elif action == "stop":
+                    worker.force_stop_app(value)
+                elif action == "uninstall":
+                    worker.uninstall_app(value)
+                elif action == "clear":
+                    worker.clear_storage(value)
+                elif action == "unlock":
+                    worker.unlock_swipe_up()
+                    worker.log("✓ Mở khóa")
+                elif action == "rotate":
+                    worker.rotate_screen(int(value or 0))
+                    worker.log(f"✓ Xoay {value}")
+                elif action == "wait":
+                    try:
+                        time.sleep(float(value) / 1000.0)
+                    except Exception:
+                        time.sleep(0.5)
+                elif action == "run_python":
+                    if value and os.path.exists(value):
+                        worker.log(f"▶ Chạy Python: {value}")
+                        subprocess.run(["python", value], timeout=60)
+                    else:
+                        worker.log(f"✗ Không thấy file: {value}")
+
+                time.sleep(delay_ms / 1000.0)
+
+            if loop > 0 and count >= loop:
+                break
+
+        worker.script_running = False
+        worker.log("✓ Kết thúc kịch bản")
+
+    def _handle_miss(self, worker, img, mode, value):
+        worker.log(f"✗ Không tìm thấy: {value}")
+        reason = f"Không tìm thấy [{mode}] = {value}"
+        found = None
         try:
-            box, txt, score = row[0], row[1], row[2]
+            found = self.matcher.find(img, reason=reason)
         except Exception:
-            continue
-        if not txt or float(score) < 0.4:
-            continue
-        xs = [p[0] for p in box]
-        ys = [p[1] for p in box]
-        x1, y1, x2, y2 = min(xs), min(ys), max(xs), max(ys)
-        items.append({
-            "text": str(txt),
-            "x": int(ox + (x1 + x2) / 2),
-            "y": int(oy + (y1 + y2) / 2),
-            "w": int(x2 - x1),
-            "h": int(y2 - y1),
-            "score": float(score),
-        })
-    return items
-
-
-def find_text(screen_img, needle, region=None, lang="eng"):
-    """Tìm chữ (không phân biệt hoa thường). Trả về (x, y) hoặc None."""
-    needle = (needle or "").strip().lower()
-    if not needle:
-        return None
-    for item in ocr_text(screen_img, region=region, lang=lang):
-        if needle in item["text"].lower():
-            return item["x"], item["y"]
-    return None
-
-
-def vision_status():
-    return {
-        "opencv": HAS_CV2,
-        "ocr": HAS_OCR,
-        "ocr_engine": "rapidocr" if HAS_OCR else None,
-    }
+            found = None
+        if found:
+            x, y, score = found
+            worker.log(f"Template score={score:.2f}")
+            self._tap_from_image(img, x, y)
+            return
+        size = img.size if img else None
+        sug = self.memory.suggest(reason, current_size=size)
+        if sug and sug[0] is not None:
+            self._tap_from_image(img, sug[0], sug[1])
+            return
+        if worker.help_enabled:
+            result = worker.request_help(reason)
+            if result is None or result == "stop":
+                worker.script_running = False
+            elif result == "skip":
+                worker.log("⏭ Bỏ qua bước")
+            elif isinstance(result, tuple) and result[0] == "tap":
+                self._tap_from_image(img, result[1], result[2])
+        else:
+            worker.log("⚠ Bỏ qua (tắt hỗ trợ)")
