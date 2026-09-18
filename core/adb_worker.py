@@ -502,3 +502,18 @@ done
 
     def set_help_result(self, result):
         self._help_result = result
+    def get_screenshot_live(self):
+        """Ảnh mới nhất từ thiết bị, không dùng cache Service."""
+        img = self.take_screenshot_adb()
+        if img is None:
+            img = self.get_screenshot_full()
+        img = self.correct_orientation(img)
+        if img:
+            self.last_device_size = img.size
+        if img and self.quality < 1.0:
+            w, h = img.size
+            img = img.resize(
+                (max(1, int(w * self.quality)), max(1, int(h * self.quality))),
+                Image.LANCZOS
+            )
+        return img

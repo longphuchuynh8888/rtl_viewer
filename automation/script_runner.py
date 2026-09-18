@@ -28,8 +28,16 @@ class ScriptRunner:
             return img.size
         return (1, 1)
 
+    def _refresh_preview(self):
+        worker = self.worker
+        worker.force_next = True
+        preview = worker.get_screenshot()
+        if preview:
+            worker.last_image = preview.copy()
+            worker.save_local(preview)
+            worker.screenshot_ready.emit(preview)
+
     def _tap_from_image(self, img, x, y, long=False):
-        """Đổi tọa độ trên ảnh screenshot sang tọa độ thiết bị rồi tap."""
         dw, dh = self._device_size(img)
         iw, ih = img.size if img is not None else (dw, dh)
         if iw <= 0 or ih <= 0:
@@ -41,7 +49,12 @@ class ScriptRunner:
             self.worker.long_press(nx, ny)
         else:
             self.worker.tap(nx, ny)
-        self.worker.log(f"✓ Tap thiết bị ({nx},{ny}) từ ảnh ({int(x)},{int(y)}) size={iw}x{ih} → {dw}x{dh}")
+        self.worker.log(
+            f"✓ Tap thiết bị ({nx},{ny}) từ ảnh ({int(x)},{int(y)}) "
+            f"size={iw}x{ih} → {dw}x{dh}"
+        )
+        time.sleep(0.35)
+        self._refresh_preview()
 
     def find_and_tap(self, elements, mode, value, long=False):
         if mode == "coords":
@@ -99,7 +112,10 @@ class ScriptRunner:
                 action = step.get("action")
                 value = step.get("value", "")
                 mode = step.get("mode", "coords")
-                img = worker.get_screenshot()
+                if self.engine == "vision":
+                    img = worker.get_screenshot_full()
+                else:
+                    img = worker.get_screenshot()
 
                 if not evaluate_step_conditions(
                     step, elements=elements, img=img, matcher=self.matcher
@@ -120,6 +136,7 @@ class ScriptRunner:
                         )
                         if ok:
                             worker.log(f"✓ {action} ({mode}): {value}")
+                            self._refresh_preview()
                         else:
                             self._handle_miss(worker, img, mode, value)
 
@@ -158,16 +175,21 @@ class ScriptRunner:
                         worker.adb(["shell", "input", "swipe",
                                     parts[0], parts[1], parts[2], parts[3], dur])
                         worker.log(f"✓ Swipe {value}")
+                        self._refresh_preview()
 
                 elif action == "text":
                     worker.send_text(value, press_enter=step.get("enter", True))
+                    self._refresh_preview()
                 elif action == "key":
                     worker.adb(["shell", "input", "keyevent", value])
                     worker.log(f"✓ Key: {value}")
+                    self._refresh_preview()
                 elif action == "launch":
                     worker.launch_app(value)
+                    self._refresh_preview()
                 elif action == "stop":
                     worker.force_stop_app(value)
+                    self._refresh_preview()
                 elif action == "uninstall":
                     worker.uninstall_app(value)
                 elif action == "clear":
@@ -175,9 +197,11 @@ class ScriptRunner:
                 elif action == "unlock":
                     worker.unlock_swipe_up()
                     worker.log("✓ Mở khóa")
+                    self._refresh_preview()
                 elif action == "rotate":
                     worker.rotate_screen(int(value or 0))
                     worker.log(f"✓ Xoay {value}")
+                    self._refresh_preview()
                 elif action == "wait":
                     try:
                         time.sleep(float(value) / 1000.0)
@@ -196,6 +220,7 @@ class ScriptRunner:
                 break
 
         worker.script_running = False
+        self._refresh_preview()
         worker.log("✓ Kết thúc kịch bản")
 
     def _handle_miss(self, worker, img, mode, value):

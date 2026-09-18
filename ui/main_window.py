@@ -275,7 +275,7 @@ class MainWindow(QMainWindow):
         self.worker.force_next = True
 
         def _do():
-            img = self.worker.get_screenshot()
+            img = self.worker.get_screenshot_live()
             if img:
                 self.worker.last_image = img.copy()
                 self.worker.save_local(img)
