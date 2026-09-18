@@ -1,8 +1,8 @@
+# -*- coding: utf-8 -*-
 # core/adb_worker.py
-"""Giao tiếp ADB + Service + các lệnh điều khiển thiết bị"""
+"""Giao tiep ADB + Service + lenh dieu khien thiet bi"""
 
 import subprocess
-import threading
 import time
 import io
 import os
@@ -15,12 +15,11 @@ from PyQt5.QtCore import QObject, pyqtSignal
 from PIL import Image, ImageChops
 
 DEVICE_DIR = "/data/local/tmp/rtl_screens"
-DEVICE_LATEST = f"{DEVICE_DIR}/latest.jpg"
-DEVICE_TEXT = f"{DEVICE_DIR}/screen_text.txt"
-DEVICE_DUMP = f"{DEVICE_DIR}/window_dump.xml"
-DEVICE_IPINFO = f"{DEVICE_DIR}/ipinfo.json"
+DEVICE_LATEST = DEVICE_DIR + "/latest.jpg"
+DEVICE_TEXT = DEVICE_DIR + "/screen_text.txt"
+DEVICE_DUMP = DEVICE_DIR + "/window_dump.xml"
+DEVICE_IPINFO = DEVICE_DIR + "/ipinfo.json"
 SERVICE_SCRIPT = "/data/local/tmp/screen_service.sh"
-
 SAVE_DIR = "rtl_screenshots"
 os.makedirs(SAVE_DIR, exist_ok=True)
 
@@ -37,7 +36,7 @@ class ADBWorker(QObject):
     need_help = pyqtSignal(object, str)
 
     def __init__(self):
-        super().__init__()
+        super(ADBWorker, self).__init__()
         self.running = True
         self.auto_refresh = True
         self.interval = 1.8
@@ -64,7 +63,7 @@ class ADBWorker(QObject):
         out, _, _ = self.adb(args, timeout)
         return out
 
-    def log(self, msg: str):
+    def log(self, msg):
         self.log_message.emit(msg)
 
     def get_resolution(self):
@@ -138,7 +137,6 @@ class ADBWorker(QObject):
         return None
 
     def get_screenshot_full(self):
-        """Ảnh gốc, không resize — dùng so khớp và tap game."""
         if self.mode == "service":
             img = (self.take_screenshot_service_pull()
                    or self.take_screenshot_service_cat()
@@ -160,6 +158,21 @@ class ADBWorker(QObject):
             )
         return img
 
+    def get_screenshot_live(self):
+        img = self.take_screenshot_adb()
+        if img is None:
+            img = self.get_screenshot_full()
+        img = self.correct_orientation(img)
+        if img:
+            self.last_device_size = img.size
+        if img and self.quality < 1.0:
+            w, h = img.size
+            img = img.resize(
+                (max(1, int(w * self.quality)), max(1, int(h * self.quality))),
+                Image.LANCZOS
+            )
+        return img
+
     def has_changed(self, new_img):
         if self.force_next or self.last_image is None:
             self.force_next = False
@@ -167,7 +180,7 @@ class ADBWorker(QObject):
         try:
             a = self.last_image.resize((64, 64), Image.BILINEAR).convert("L")
             b = new_img.resize((64, 64), Image.BILINEAR).convert("L")
-            avg = sum(ImageChops.difference(a, b).getdata()) / (64 * 64)
+            avg = sum(ImageChops.difference(a, b).getdata()) / (64.0 * 64.0)
             return avg > self.change_threshold
         except Exception:
             return True
@@ -191,14 +204,14 @@ class ADBWorker(QObject):
                         self.save_local(img)
                         self.screenshot_ready.emit(img)
                         self.status_message.emit(
-                            f"Thay đổi • {datetime.now().strftime('%H:%M:%S')}"
+                            "Thay doi • " + datetime.now().strftime("%H:%M:%S")
                         )
                     else:
                         self.status_message.emit(
-                            f"Không đổi • {datetime.now().strftime('%H:%M:%S')}"
+                            "Khong doi • " + datetime.now().strftime("%H:%M:%S")
                         )
                 else:
-                    self.status_message.emit("Không có ảnh")
+                    self.status_message.emit("Khong co anh")
             if self.auto_unlock:
                 self.try_auto_unlock()
             time.sleep(self.interval)
@@ -208,30 +221,73 @@ class ADBWorker(QObject):
         self.script_running = False
 
     def install_service(self):
-        script = f'''#!/system/bin/sh
-DIR="{DEVICE_DIR}"
+        script = """#!/system/bin/sh
+DIR="/data/local/tmp/rtl_screens"
 mkdir -p "$DIR"
 LATEST="$DIR/latest.jpg"
 LATEST_PNG="$DIR/latest_full.png"
 TEXTFILE="$DIR/screen_text.txt"
 IPFILE="$DIR/ipinfo.json"
-echo "[RTL Service] Started $(date)" > "$DIR/service.log"
-get_ip_info() {{
+HUB="http://127.0.0.1:8765"
+SERIAL=$(getprop ro.serialno)
+CLOUD="/sdcard/Download/rtl_cloud/$SERIAL"
+mkdir -p "$CLOUD"
+echo "[RTL Service] Started $(date) serial=$SERIAL" > "$DIR/service.log"
+
+get_ip_info() {
     if command -v curl >/dev/null 2>&1; then
         curl -s --max-time 8 "https://ipapi.co/json/" -o "$IPFILE" 2>/dev/null && return
     fi
-    if command -v wget >/dev/null 2>&1; then
-        wget -q -T 8 -O "$IPFILE" "https://ipapi.co/json/" 2>/dev/null && return
-    fi
-    echo '{{"ip":"unknown","country_name":"Unknown","country_code":"—","city":"—"}}' > "$IPFILE"
-}}
-dump_screen_text() {{
+    echo '{"ip":"unknown"}' > "$IPFILE"
+}
+
+dump_screen_text() {
     uiautomator dump "$DIR/window_dump.xml" >/dev/null 2>&1
     if [ -f "$DIR/window_dump.xml" ]; then
-        grep -o 'text="[^"]*"' "$DIR/window_dump.xml" 2>/dev/null | \\
-            sed 's/text="//g; s/"//g' | grep -v '^$' > "$TEXTFILE"
+        grep -o 'text="[^"]*"' "$DIR/window_dump.xml" 2>/dev/null | sed 's/text="//g; s/"//g' | grep -v '^$' > "$TEXTFILE"
     fi
-}}
+}
+
+handle_cmd() {
+    CMD="$1"
+    [ -z "$CMD" ] && return
+    echo "$CMD" | grep -q tap || return
+    X=$(echo "$CMD" | sed -n 's/.*"x":[ ]*\\([0-9][0-9]*\\).*/\\1/p')
+    Y=$(echo "$CMD" | sed -n 's/.*"y":[ ]*\\([0-9][0-9]*\\).*/\\1/p')
+    if [ -n "$X" ] && [ -n "$Y" ]; then
+        input tap "$X" "$Y"
+        echo "[CMD] tap $X $Y" >> "$DIR/service.log"
+    fi
+}
+
+do_hub() {
+    [ -f "$LATEST" ] || return
+    if command -v curl >/dev/null 2>&1; then
+        curl -s --max-time 4 -X POST --data-binary @"$LATEST" "$HUB/shot/$SERIAL" >/dev/null 2>&1
+        CMD=$(curl -s --max-time 3 "$HUB/cmd/$SERIAL" 2>/dev/null)
+        handle_cmd "$CMD"
+    fi
+}
+do_aws() {
+    [ -f "$DIR/cloud.url" ] || return
+    [ -f "$LATEST" ] || return
+    URL=$(cat "$DIR/cloud.url")
+    command -v curl >/dev/null 2>&1 || return
+    curl -s --max-time 8 -X POST --data-binary @"$LATEST" \
+        "$URL?op=shot&serial=$SERIAL" >/dev/null 2>&1
+    CMD=$(curl -s --max-time 5 "$URL?op=cmd&serial=$SERIAL")
+    handle_cmd "$CMD"
+}
+do_cloud() {
+    [ -f "$LATEST" ] || return
+    cp "$LATEST" "$CLOUD/latest.jpg" 2>/dev/null
+    if [ -f "$CLOUD/cmd.json" ]; then
+        CMD=$(cat "$CLOUD/cmd.json")
+        rm -f "$CLOUD/cmd.json"
+        handle_cmd "$CMD"
+    fi
+}
+
 get_ip_info
 COUNTER=0
 while true; do
@@ -241,49 +297,52 @@ while true; do
     else
         cp "$LATEST_PNG" "$LATEST" 2>/dev/null
     fi
-    if [ $((COUNTER % 3)) -eq 0 ]; then dump_screen_text; fi
-    find "$DIR" -name "*.png" ! -name "latest_full.png" -mmin +5 -delete 2>/dev/null
-    find "$DIR" -name "*.jpg" ! -name "latest.jpg" -mmin +5 -delete 2>/dev/null
+    do_hub
+    do_aws
+    do_cloud
+    if [ $((COUNTER % 3)) -eq 0 ]; then
+        dump_screen_text
+    fi
     COUNTER=$((COUNTER+1))
-    if [ $COUNTER -ge 40 ]; then get_ip_info; COUNTER=0; fi
     sleep 1.6
 done
-'''
+"""
         local = "screen_service_temp.sh"
-        with open(local, "w", newline="\n") as f:
-            f.write(script)
+        with open(local, "w") as f:
+            f.write(script.replace("\r\n", "\n"))
         self.adb(["push", local, SERVICE_SCRIPT])
         try:
             os.remove(local)
         except Exception:
             pass
         self.adb(["shell", "chmod", "755", SERVICE_SCRIPT])
-        self.adb(["shell", f"mkdir -p {DEVICE_DIR}"])
-        self.log("✓ Cài Service thành công")
+        self.adb(["shell", "mkdir -p " + DEVICE_DIR])
+        self.adb(["reverse", "tcp:8765", "tcp:8765"])
+        self.log("Da cai Service + adb reverse :8765")
 
     def start_service(self):
         self.adb(["shell", "pkill", "-f", "screen_service.sh"])
         time.sleep(0.4)
-        self.adb(["shell", f"nohup {SERVICE_SCRIPT} > {DEVICE_DIR}/service.log 2>&1 &"])
-        self.log("✓ Đã Start Service")
+        self.adb(["shell", "nohup " + SERVICE_SCRIPT + " > " + DEVICE_DIR + "/service.log 2>&1 &"])
+        self.log("Da Start Service")
 
     def stop_service(self):
         self.adb(["shell", "pkill", "-f", "screen_service.sh"])
-        self.log("✓ Đã Stop Service")
+        self.log("Da Stop Service")
 
     def check_service(self):
         out = self.adb_out(["shell", "ps -A | grep screen_service"], 6)
         running = out and b"screen_service" in out
-        self.log("✓ Service đang chạy" if running else "✗ Service không chạy")
+        self.log("Service dang chay" if running else "Service khong chay")
         return running
 
     def get_screen_text(self):
         data = self.adb_out(["exec-out", "cat", DEVICE_TEXT], 8)
         if data:
             text = data.decode(errors="ignore").strip()
-            self.screen_text_ready.emit(text if text else "(Không có text)")
+            self.screen_text_ready.emit(text if text else "(Khong co text)")
         else:
-            self.screen_text_ready.emit("(Chưa có dữ liệu)")
+            self.screen_text_ready.emit("(Chua co du lieu)")
 
     def dump_ui(self):
         self.adb(["shell", "uiautomator", "dump", DEVICE_DUMP], timeout=10)
@@ -294,7 +353,7 @@ done
         from automation.ui_parser import parse_ui_dump
         elements = parse_ui_dump(data.decode(errors="ignore"))
         self.ui_elements_ready.emit(elements)
-        self.log(f"✓ Dump UI: {len(elements)} phần tử")
+        self.log("Dump UI: %d phan tu" % len(elements))
 
     def tap(self, x, y):
         self.adb(["shell", "input", "tap", str(int(x)), str(int(y))])
@@ -305,15 +364,14 @@ done
 
     def push_file(self, local_path, remote_path=None):
         if not remote_path:
-            remote_path = f"/sdcard/Download/{os.path.basename(local_path)}"
+            remote_path = "/sdcard/Download/" + os.path.basename(local_path)
         code = self.adb(["push", local_path, remote_path], timeout=60)[2]
-        self.log(f"{'✓' if code == 0 else '✗'} Gửi file: {os.path.basename(local_path)}")
+        self.log("Gui file: " + os.path.basename(local_path))
 
     def pull_file(self, remote_path, local_path=None):
         if not local_path:
             local_path = os.path.basename(remote_path)
-        code = self.adb(["pull", remote_path, local_path], timeout=60)[2]
-        self.log(f"{'✓' if code == 0 else '✗'} Lấy file: {remote_path}")
+        self.adb(["pull", remote_path, local_path], timeout=60)
 
     def list_packages(self, pkg_type="user"):
         cmd = ["shell", "pm", "list", "packages"] if pkg_type == "all" else ["shell", "pm", "list", "packages", "-3"]
@@ -338,23 +396,20 @@ done
 
     def launch_app(self, package):
         self.adb(["shell", "monkey", "-p", package, "-c", "android.intent.category.LAUNCHER", "1"])
-        self.log(f"✓ Đã mở: {package}")
+        self.log("Da mo: " + package)
 
     def force_stop_app(self, package):
-        code = self.adb(["shell", "am", "force-stop", package])[2]
-        self.log(f"{'✓' if code == 0 else '✗'} Đã dừng: {package}")
+        self.adb(["shell", "am", "force-stop", package])
+        self.log("Da dung: " + package)
 
     def uninstall_app(self, package):
-        code = self.adb(["shell", "pm", "uninstall", package])[2]
-        self.log(f"{'✓' if code == 0 else '✗'} Gỡ: {package}")
+        self.adb(["shell", "pm", "uninstall", package])
 
     def clear_storage(self, package):
-        code = self.adb(["shell", "pm", "clear", package])[2]
-        self.log(f"{'✓' if code == 0 else '✗'} Clear Storage: {package}")
+        self.adb(["shell", "pm", "clear", package])
 
     def clear_cache(self, package):
-        code = self.adb(["shell", "pm", "clear", package])[2]
-        self.log(f"{'✓' if code == 0 else '✗'} Clear Cache: {package}")
+        self.adb(["shell", "pm", "clear", package])
 
     def send_text(self, text, press_enter=True, mode="auto", is_password=False):
         if not text:
@@ -362,30 +417,25 @@ done
         if mode == "auto":
             mode = "char" if is_password else "input"
         if mode == "adbkeyboard":
-            ok = self.send_text_adbkeyboard(text)
-            if not ok:
-                self.log("⚠ ADB Keyboard thất bại, fallback input text")
+            if not self.send_text_adbkeyboard(text):
                 mode = "input"
         if mode == "char":
             self._send_text_char_by_char(text)
         elif mode == "input":
-            escaped = self._escape_adb_text(text)
-            self.adb(["shell", "input", "text", escaped])
+            self.adb(["shell", "input", "text", self._escape_adb_text(text)])
         if press_enter:
             time.sleep(0.15)
             self.adb(["shell", "input", "keyevent", "KEYCODE_ENTER"])
-        self.log(f"✓ Gửi ({mode}): {text[:40]}...")
 
-    def _escape_adb_text(self, text: str) -> str:
+    def _escape_adb_text(self, text):
         mapping = {
             " ": "%s", "%": "%%", "'": "\\'", '"': '\\"', "\\": "\\\\",
             "&": "\\&", "<": "\\<", ">": "\\>", "|": "\\|", ";": "\\;",
             "(": "\\(", ")": "\\)", "#": "\\#", "$": "\\$", "`": "\\`",
-            "!": "\\!", "?": "\\?", "*": "\\*", "~": "\\~",
         }
         return "".join(mapping.get(ch, ch) for ch in text)
 
-    def _send_text_char_by_char(self, text: str) -> bool:
+    def _send_text_char_by_char(self, text):
         key_alias = {
             "@": "AT", "#": "POUND", "*": "STAR", "/": "SLASH",
             "\\": "BACKSLASH", ",": "COMMA", ".": "PERIOD",
@@ -395,7 +445,7 @@ done
         try:
             for ch in text:
                 if ch in key_alias:
-                    self.adb(["shell", "input", "keyevent", f"KEYCODE_{key_alias[ch]}"])
+                    self.adb(["shell", "input", "keyevent", "KEYCODE_" + key_alias[ch]])
                 elif ch.isalnum():
                     self.adb(["shell", "input", "text", ch])
                 else:
@@ -405,13 +455,14 @@ done
         except Exception:
             return False
 
-    def send_text_adbkeyboard(self, text: str) -> bool:
+    def send_text_adbkeyboard(self, text):
         _, _, code = self.adb([
-            "shell", "am", "broadcast",
-            "-a", "ADB_INPUT_TEXT",
-            "--es", "msg", text
+            "shell", "am", "broadcast", "-a", "ADB_INPUT_TEXT", "--es", "msg", text
         ])
         return code == 0
+
+    def install_apk(self, apk_path):
+        self.adb(["install", "-r", apk_path], timeout=120)
 
     def install_adb_keyboard(self, apk_path):
         self.install_apk(apk_path)
@@ -421,16 +472,9 @@ done
         ime = "com.android.adbkeyboard/.AdbIME"
         self.adb(["shell", "ime", "enable", ime])
         self.adb(["shell", "ime", "set", ime])
-        self.log("✓ Đã bật ADB Keyboard")
 
     def disable_adb_keyboard(self):
         self.adb(["shell", "ime", "reset"])
-        self.log("✓ Đã trả bàn phím mặc định")
-
-    def install_apk(self, apk_path):
-        self.log(f"Đang cài {os.path.basename(apk_path)}...")
-        code = self.adb(["install", "-r", apk_path], timeout=120)[2]
-        self.log("✓ Cài APK thành công" if code == 0 else "✗ Lỗi cài APK")
 
     def install_from_url(self, url):
         try:
@@ -439,11 +483,11 @@ done
             self.install_apk(local)
             os.remove(local)
         except Exception as e:
-            self.log(f"✗ Lỗi: {e}")
+            self.log(str(e))
 
     def open_play_store(self, package):
         self.adb(["shell", "am", "start", "-a", "android.intent.action.VIEW",
-                  "-d", f"market://details?id={package}"])
+                  "-d", "market://details?id=" + package])
 
     def rotate_screen(self, orientation):
         self.adb(["shell", "settings", "put", "system", "accelerometer_rotation", "0"])
@@ -458,12 +502,7 @@ done
                   str(w // 2), str(int(h * 0.25)), "300"])
 
     def try_auto_unlock(self):
-        self.adb(["shell", "input", "keyevent", "KEYCODE_WAKEUP"])
-        time.sleep(0.3)
-        w, h = self.get_resolution()
-        self.adb(["shell", "input", "swipe",
-                  str(w // 2), str(int(h * 0.8)),
-                  str(w // 2), str(int(h * 0.3)), "250"])
+        self.unlock_swipe_up()
 
     def get_device_info(self):
         info = {}
@@ -474,21 +513,20 @@ done
             "Serial": "ro.serialno"
         }.items():
             out = self.adb_out(["shell", "getprop", prop], 5)
-            info[name] = out.decode(errors="ignore").strip() if out else "—"
+            info[name] = out.decode(errors="ignore").strip() if out else "-"
         w, h = self.get_resolution()
-        info["Resolution"] = f"{w}×{h}"
+        info["Resolution"] = "%sx%s" % (w, h)
         data = self.adb_out(["exec-out", "cat", DEVICE_IPINFO], 8)
         if data:
             try:
                 j = json.loads(data.decode(errors="ignore"))
-                info["Public IP"] = j.get("ip", "—")
-                info["Country"] = j.get("country_name", "—")
+                info["Public IP"] = j.get("ip", "-")
+                info["Country"] = j.get("country_name", "-")
             except Exception:
                 pass
         self.device_info_ready.emit(info)
 
-    def request_help(self, reason="Không tìm thấy phần tử"):
-        self.log(f"⚠ Cần hỗ trợ: {reason}")
+    def request_help(self, reason="Khong tim thay"):
         img = self.get_screenshot_full() or self.take_screenshot_adb()
         self._help_result = None
         self.need_help.emit(img, reason)
@@ -502,18 +540,3 @@ done
 
     def set_help_result(self, result):
         self._help_result = result
-    def get_screenshot_live(self):
-        """Ảnh mới nhất từ thiết bị, không dùng cache Service."""
-        img = self.take_screenshot_adb()
-        if img is None:
-            img = self.get_screenshot_full()
-        img = self.correct_orientation(img)
-        if img:
-            self.last_device_size = img.size
-        if img and self.quality < 1.0:
-            w, h = img.size
-            img = img.resize(
-                (max(1, int(w * self.quality)), max(1, int(h * self.quality))),
-                Image.LANCZOS
-            )
-        return img

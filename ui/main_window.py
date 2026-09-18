@@ -20,6 +20,7 @@ from ui.tabs.app_tab import AppTab
 from ui.tabs.automation_tab import AutomationTab
 from automation.human_loop import HelpDialog
 from automation.learning.action_memory import ActionMemory
+from core.http_hub import HubServer, HUB
 
 
 class MainWindow(QMainWindow):
@@ -137,6 +138,18 @@ class MainWindow(QMainWindow):
         self.splitter.setStretchFactor(1, 2)
         root.addWidget(self.splitter, 3)
 
+        top.addWidget(QLabel("Kênh:"))
+        self.combo_transport = QComboBox()
+        self.combo_transport.addItem("ADB (1 máy)", "adb")
+        self.combo_transport.addItem("HTTP Hub", "http")
+        self.combo_transport.addItem("Google Drive (sau)", "gdrive")
+        self.combo_transport.addItem("Thư mục chia sẻ / Tegrabox (sau)", "folder")
+        top.addWidget(self.combo_transport)
+        
+        btn_http = QPushButton("Start HTTP + adb reverse")
+        btn_http.clicked.connect(self.start_http_hub)
+        top.addWidget(btn_http)
+        
         log_head = QHBoxLayout()
         log_head.addWidget(QLabel("Nhật ký"))
         btn_clear_log = QPushButton("Xóa log")
@@ -310,3 +323,9 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         self.worker.stop()
         event.accept()
+    def start_http_hub(self):
+        if not hasattr(self, "hub"):
+            self.hub = HubServer(8765)
+        self.hub.start()
+        self.worker.adb(["reverse", "tcp:8765", "tcp:8765"])
+        self.append_log("✓ HTTP Hub :8765 + adb reverse")
