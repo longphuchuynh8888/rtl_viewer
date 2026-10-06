@@ -11,8 +11,9 @@ from ui.dialogs import AccountDialog
 from utils.crypto import encrypt_text, decrypt_text
 from utils.storage import load_json, save_json
 from PyQt5.QtWidgets import QFileDialog, QComboBox
-ACCOUNTS_FILE = "google_accounts.json"
-
+import os
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+ACCOUNTS_FILE = os.path.join(ROOT, "google_accounts.json")
 class AccountTab(QWidget):
     def __init__(self, main_window):
         super().__init__()

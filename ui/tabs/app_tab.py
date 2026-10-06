@@ -9,8 +9,9 @@ import threading
 
 from ui.dialogs import AppDialog
 from utils.storage import load_json, save_json
-
-APPS_FILE = "managed_apps.json"
+import os
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+APPS_FILE = os.path.join(ROOT, "managed_apps.json")
 
 class AppTab(QWidget):
     def __init__(self, main_window):
