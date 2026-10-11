@@ -1,11 +1,10 @@
 # core/device_store.py
-import os
 from utils.storage import load_json, save_json
+from core.paths import DEVICES
 
-PATH = "devices.json"
 
 class DeviceStore:
-    def __init__(self, path=PATH):
+    def __init__(self, path=DEVICES):
         self.path = path
         data = load_json(path, {"devices": {}})
         self.devices = data.get("devices") or {}

@@ -1,15 +1,16 @@
 # core/url_store.py
 from utils.storage import load_json, save_json
+from core.paths import AWS_URLS
 
-PATH = "aws_urls.json"
 
 class UrlStore:
-    def __init__(self, path=PATH):
+    def __init__(self, path=AWS_URLS):
+        self.path = path
         data = load_json(path, {"urls": {}})
         self.urls = data.get("urls") or {}
 
     def save(self):
-        save_json(PATH, {"urls": self.urls})
+        save_json(self.path, {"urls": self.urls})
 
     def names(self):
         return sorted(self.urls.keys())

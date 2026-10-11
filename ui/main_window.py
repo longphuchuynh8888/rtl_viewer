@@ -1,15 +1,14 @@
 # ui/main_window.py
-"""Cua so chinh"""
+"""Cua so chinh — khung, tab, log, refresh, tap."""
 
 import subprocess
 import threading
 from datetime import datetime
 
 from PyQt5.QtWidgets import (
-    QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QPushButton,
+    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
     QLabel, QCheckBox, QSpinBox, QComboBox, QStatusBar, QTabWidget,
-    QFileDialog, QInputDialog, QMessageBox, QSplitter, QTextEdit,
-    QApplication
+    QFileDialog, QInputDialog, QMessageBox, QSplitter, QTextEdit
 )
 from PyQt5.QtCore import Qt, QTimer
 
@@ -19,6 +18,7 @@ from core.device_store import DeviceStore
 from core.url_store import UrlStore
 from core.http_hub import HubServer, HUB
 from ui.screen_label import ScreenLabel
+from ui.toolbar import TopToolbar
 from ui.tabs.control_tab import ControlTab
 from ui.tabs.account_tab import AccountTab
 from ui.tabs.app_tab import AppTab
@@ -75,56 +75,8 @@ class MainWindow(QMainWindow):
         root = QVBoxLayout(central)
         root.setContentsMargins(8, 8, 8, 8)
 
-        top = QHBoxLayout()
-        self.btn_toggle_screen = QPushButton("An/Hien man hinh")
-        self.btn_toggle_screen.setCheckable(True)
-        self.btn_toggle_screen.setChecked(True)
-        self.btn_toggle_screen.clicked.connect(self.toggle_screen)
-        top.addWidget(self.btn_toggle_screen)
-
-        top.addWidget(QLabel("Kenh:"))
-        self.combo_transport = QComboBox()
-        self.combo_transport.addItem("ADB (1 may)", "adb")
-        self.combo_transport.addItem("HTTP Hub", "http")
-        self.combo_transport.addItem("AWS Lambda", "aws")
-        self.combo_transport.addItem("Thu muc / Terabox", "folder")
-        self.combo_transport.currentIndexChanged.connect(self.on_transport_changed)
-        top.addWidget(self.combo_transport)
-
-        btn_http = QPushButton("Start HTTP + adb reverse")
-        btn_http.clicked.connect(self.start_http_hub)
-        top.addWidget(btn_http)
-
-        top.addWidget(QLabel("Function URL:"))
-        self.combo_aws_url = QComboBox()
-        self.combo_aws_url.setMinimumWidth(200)
-        self.combo_aws_url.currentIndexChanged.connect(self.on_url_chosen)
-        top.addWidget(self.combo_aws_url)
-
-        btn_url_add = QPushButton("Them URL")
-        btn_url_add.clicked.connect(self.add_aws_url)
-        btn_url_edit = QPushButton("Sua URL")
-        btn_url_edit.clicked.connect(self.edit_aws_url)
-        btn_url_del = QPushButton("Xoa URL")
-        btn_url_del.clicked.connect(self.delete_aws_url)
-        top.addWidget(btn_url_add)
-        top.addWidget(btn_url_edit)
-        top.addWidget(btn_url_del)
-
-        top.addWidget(QLabel("May:"))
-        self.combo_device = QComboBox()
-        self.combo_device.setMinimumWidth(220)
-        self.combo_device.currentIndexChanged.connect(self.on_device_chosen)
-        top.addWidget(self.combo_device)
-
-        btn_add_dev = QPushButton("Them serial")
-        btn_add_dev.clicked.connect(self.add_device_manual)
-        btn_copy = QPushButton("Chep serial")
-        btn_copy.clicked.connect(self.copy_serial)
-        top.addWidget(btn_add_dev)
-        top.addWidget(btn_copy)
-        top.addStretch()
-        root.addLayout(top)
+        self.toolbar = TopToolbar(self)
+        root.addWidget(self.toolbar)
 
         self.splitter = QSplitter(Qt.Horizontal)
         self.screen_panel = QWidget()
@@ -202,113 +154,11 @@ class MainWindow(QMainWindow):
 
         self.status = QStatusBar()
         self.setStatusBar(self.status)
-        self.reload_device_combo()
-        self.reload_url_combo()
-
-    def reload_device_combo(self):
-        current = self.aws_serial
-        self.combo_device.blockSignals(True)
-        self.combo_device.clear()
-        for serial in self.device_store.serials():
-            self.combo_device.addItem(self.device_store.label(serial), serial)
-        self.combo_device.blockSignals(False)
-        idx = self.combo_device.findData(current)
-        if idx >= 0:
-            self.combo_device.setCurrentIndex(idx)
-        elif self.combo_device.count():
-            self.on_device_chosen()
-
-    def reload_url_combo(self):
-        current = self.combo_aws_url.currentData()
-        self.combo_aws_url.blockSignals(True)
-        self.combo_aws_url.clear()
-        for name in self.url_store.names():
-            url = self.url_store.get(name)
-            self.combo_aws_url.addItem("%s | %s" % (name, url[:32]), name)
-        self.combo_aws_url.blockSignals(False)
-        if current:
-            idx = self.combo_aws_url.findData(current)
-            if idx >= 0:
-                self.combo_aws_url.setCurrentIndex(idx)
-        self.on_url_chosen()
-
-    def on_device_chosen(self):
-        self.aws_serial = self.combo_device.currentData() or ""
-        if self.aws_serial:
-            self.append_log("Chon may: " + self.aws_serial)
-
-    def on_url_chosen(self):
-        name = self.combo_aws_url.currentData()
-        url = self.url_store.get(name) if name else ""
-        self.relay = AwsRelay(url)
-        if url:
-            self.append_log("URL: " + name)
-
-    def add_device_manual(self):
-        serial, ok = QInputDialog.getText(self, "Them may", "Serial:")
-        if not ok or not (serial or "").strip():
-            return
-        name, ok2 = QInputDialog.getText(self, "Them may", "Ten may:", text=serial.strip())
-        self.device_store.upsert(serial.strip(), name=(name.strip() if ok2 else serial.strip()))
-        self.reload_device_combo()
-        idx = self.combo_device.findData(serial.strip())
-        if idx >= 0:
-            self.combo_device.setCurrentIndex(idx)
-
-    def copy_serial(self):
-        serial = self.combo_device.currentData() or self.aws_serial or ""
-        if not serial:
-            self.append_log("Chua chon may")
-            return
-        QApplication.clipboard().setText(serial)
-        self.append_log("Da chep serial: " + serial)
-
-    def add_aws_url(self):
-        name, ok = QInputDialog.getText(self, "Them Function URL", "Ten:")
-        if not ok or not name.strip():
-            return
-        url, ok2 = QInputDialog.getText(self, "Them Function URL", "URL:")
-        if not ok2 or not url.strip():
-            return
-        self.url_store.upsert(name.strip(), url.strip())
-        self.reload_url_combo()
-        idx = self.combo_aws_url.findData(name.strip())
-        if idx >= 0:
-            self.combo_aws_url.setCurrentIndex(idx)
-
-    def edit_aws_url(self):
-        name = self.combo_aws_url.currentData()
-        if not name:
-            return
-        url, ok = QInputDialog.getText(self, "Sua URL", "URL:", text=self.url_store.get(name))
-        if not ok:
-            return
-        new_name, ok2 = QInputDialog.getText(self, "Sua URL", "Ten:", text=name)
-        if not ok2:
-            return
-        if new_name.strip() != name:
-            self.url_store.delete(name)
-        self.url_store.upsert(new_name.strip(), url.strip())
-        self.reload_url_combo()
-
-    def delete_aws_url(self):
-        name = self.combo_aws_url.currentData()
-        if not name:
-            return
-        if QMessageBox.question(self, "Xoa", "Xoa %s?" % name) != QMessageBox.Yes:
-            return
-        self.url_store.delete(name)
-        self.reload_url_combo()
+        self.toolbar.reload_device_combo()
+        self.toolbar.reload_url_combo()
 
     def apply_aws_settings(self):
-        self.on_url_chosen()
-        self.aws_serial = self.combo_device.currentData() or ""
-
-    def on_transport_changed(self):
-        self.transport = self.combo_transport.currentData()
-        self.append_log("Kenh: " + str(self.transport))
-        if self.transport == "aws":
-            self.apply_aws_settings()
+        self.toolbar.apply_aws_settings()
 
     def _connect_signals(self):
         self.worker.screenshot_ready.connect(self.on_new_frame)
@@ -329,7 +179,7 @@ class MainWindow(QMainWindow):
         )
 
     def toggle_screen(self):
-        self.screen_panel.setVisible(self.btn_toggle_screen.isChecked())
+        self.screen_panel.setVisible(self.toolbar.btn_toggle_screen.isChecked())
 
     def on_need_help(self, img, reason):
         dlg = HelpDialog(img, reason, self, memory=self.memory)
@@ -353,10 +203,10 @@ class MainWindow(QMainWindow):
                 country=info.get("Country", "-"),
                 ip=info.get("Public IP", "-"),
             )
-            self.reload_device_combo()
-            idx = self.combo_device.findData(serial)
+            self.toolbar.reload_device_combo()
+            idx = self.toolbar.combo_device.findData(serial)
             if idx >= 0:
-                self.combo_device.setCurrentIndex(idx)
+                self.toolbar.combo_device.setCurrentIndex(idx)
         self.control_tab.info_label.setText(
             "<b>%s</b><br>Android: %s<br>Serial: %s<br>IP: %s | %s" % (
                 name,
