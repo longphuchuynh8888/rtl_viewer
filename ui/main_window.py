@@ -3,6 +3,7 @@
 
 import subprocess
 import threading
+import time
 from datetime import datetime
 
 from PyQt5.QtWidgets import (
@@ -64,7 +65,7 @@ class MainWindow(QMainWindow):
         self.account_tab = AccountTab(self)
         self.app_tab = AppTab(self)
         self.automation_tab = AutomationTab(self)
-
+        self.last_draw_time = 0
         self._build_ui()
         self._connect_signals()
         self._start_loops()
@@ -277,12 +278,28 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(1300, self.manual_refresh)
 
     def on_new_frame(self, img):
-        if img:
-            self.screen.update_image(img)
+        print(">>> on_new_frame duoc goi", img)
+        self.append_log(">>> on_new_frame")
+        if not img:
+            self.append_log("Bo qua: img None")
+            return
+        t = getattr(img, "capture_time", None)
+        if t is None:
+            t = time.time()
+            img.capture_time = t
+        last = getattr(self, "last_draw_time", 0)
+        if last and (t + 0.2 < last):
+            self.append_log("Bo qua anh cu | t=%.1f last=%.1f" % (t, last))
+            return
+        self.last_draw_time = t
+        self.append_log("VE | %sx%s" % img.size)
+        self.screen.update_image(img)
 
     def manual_refresh(self):
         self.worker.force_next = True
-        self.apply_aws_settings()
+        self.worker.manual_until = time.time() + 4
+        if self.transport == "aws":
+            self.apply_aws_settings()
 
         def _do():
             img = None
@@ -297,9 +314,10 @@ class MainWindow(QMainWindow):
                 self.worker.last_image = img.copy()
                 self.worker.last_device_size = img.size
                 self.worker.save_local(img)
+                self.append_log("EMIT refresh kenh=%s" % self.transport)
                 self.worker.screenshot_ready.emit(img)
             elif self.transport == "aws":
-                self.worker.log_message.emit("AWS: khong tai duoc anh")
+                self.worker.log_message.emit("AWS: khong tai duoc anh (giu anh cu)")
 
         threading.Thread(target=_do, daemon=True).start()
 

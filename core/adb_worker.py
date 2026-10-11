@@ -38,7 +38,7 @@ class ADBWorker(QObject):
     def __init__(self):
         super(ADBWorker, self).__init__()
         self.running = True
-        self.auto_refresh = True
+        self.auto_refresh = False
         self.interval = 1.8
         self.mode = "service"
         self.auto_unlock = False
@@ -51,6 +51,8 @@ class ADBWorker(QObject):
         self.script_running = False
         self.help_enabled = True
         self._help_result = None
+        self.manual_until = 0
+        self.skip_auto = False   # main_window set True khi kenh aws/http
 
     def adb(self, args, timeout=15):
         try:
@@ -156,6 +158,8 @@ class ADBWorker(QObject):
                 (max(1, int(w * self.quality)), max(1, int(h * self.quality))),
                 Image.LANCZOS
             )
+        if img:
+            img.capture_time = time.time()
         return img
 
     def get_screenshot_live(self):
@@ -171,6 +175,8 @@ class ADBWorker(QObject):
                 (max(1, int(w * self.quality)), max(1, int(h * self.quality))),
                 Image.LANCZOS
             )
+        if img:
+            img.capture_time = time.time()
         return img
 
     def has_changed(self, new_img):
@@ -196,12 +202,15 @@ class ADBWorker(QObject):
 
     def start_loop(self):
         while self.running:
-            if self.auto_refresh and not self.script_running:
+            if (self.auto_refresh
+                and not self.script_running
+                and time.time() > self.manual_until):
                 img = self.get_screenshot()
                 if img:
                     if self.has_changed(img):
                         self.last_image = img.copy()
                         self.save_local(img)
+                        self.log("EMIT loop")
                         self.screenshot_ready.emit(img)
                         self.status_message.emit(
                             "Thay doi • " + datetime.now().strftime("%H:%M:%S")
