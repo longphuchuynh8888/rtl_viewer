@@ -35,6 +35,7 @@ class ScriptRunner:
         if preview:
             worker.last_image = preview.copy()
             worker.save_local(preview)
+            worker.log("EMIT script")
             worker.screenshot_ready.emit(preview)
 
     def _tap_from_image(self, img, x, y, long=False):

@@ -51,6 +51,8 @@ class ADBWorker(QObject):
         self.script_running = False
         self.help_enabled = True
         self._help_result = None
+        self.manual_until = 0
+        self.skip_auto = False   # main_window set True khi kenh aws/http
 
     def adb(self, args, timeout=15):
         try:
@@ -98,6 +100,8 @@ class ADBWorker(QObject):
             pass
         return img
 
+    import time
+
     def take_screenshot_service_pull(self):
         try:
             with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
@@ -109,6 +113,24 @@ class ADBWorker(QObject):
                 except Exception:
                     pass
                 return None
+
+            # Hoi gio file tren may
+            out = self.adb_out(
+                ["shell", "stat", "-c", "%Y", DEVICE_LATEST], 5
+            )
+            if out:
+                try:
+                    file_ts = int(out.decode().strip())
+                    now_out = self.adb_out(["shell", "date", "+%s"], 5)
+                    now_ts = int(now_out.decode().strip()) if now_out else 0
+                    age = now_ts - file_ts
+                    if age > 4:
+                        self.log("latest.jpg cu %ss, bo qua" % age)
+                        os.remove(tmp_path)
+                        return None
+                except Exception:
+                    pass
+
             img = Image.open(tmp_path).convert("RGB")
             try:
                 os.remove(tmp_path)
@@ -139,8 +161,8 @@ class ADBWorker(QObject):
     def get_screenshot_full(self):
         if self.mode == "service":
             img = (self.take_screenshot_service_pull()
-                   or self.take_screenshot_service_cat()
-                   or self.take_screenshot_adb())
+                or self.take_screenshot_service_cat()
+                or self.take_screenshot_adb())
         else:
             img = self.take_screenshot_adb()
         img = self.correct_orientation(img)
@@ -156,6 +178,8 @@ class ADBWorker(QObject):
                 (max(1, int(w * self.quality)), max(1, int(h * self.quality))),
                 Image.LANCZOS
             )
+        if img:
+            img.capture_time = time.time()
         return img
 
     def get_screenshot_live(self):
@@ -171,6 +195,8 @@ class ADBWorker(QObject):
                 (max(1, int(w * self.quality)), max(1, int(h * self.quality))),
                 Image.LANCZOS
             )
+        if img:
+            img.capture_time = time.time()
         return img
 
     def has_changed(self, new_img):
@@ -196,12 +222,15 @@ class ADBWorker(QObject):
 
     def start_loop(self):
         while self.running:
-            if self.auto_refresh and not self.script_running:
+            if (self.auto_refresh
+                and not self.script_running
+                and time.time() > self.manual_until):
                 img = self.get_screenshot()
                 if img:
                     if self.has_changed(img):
                         self.last_image = img.copy()
                         self.save_local(img)
+                        self.log("EMIT loop")
                         self.screenshot_ready.emit(img)
                         self.status_message.emit(
                             "Thay doi • " + datetime.now().strftime("%H:%M:%S")
@@ -291,6 +320,16 @@ do_cloud() {
 get_ip_info
 COUNTER=0
 while true; do
+    # Xoa latest.jpg neu cu hon 20 giay (Service chet hoac khong ghi kip)
+    if [ -f "$LATEST" ]; then
+        NOW=$(date +%s)
+        FT=$(stat -c %Y "$LATEST" 2>/dev/null || echo 0)
+        AGE=$((NOW - FT))
+        if [ "$AGE" -gt 20 ]; then
+            rm -f "$LATEST" "$LATEST_PNG"
+            echo "[CLEAN] xoa anh cu ${AGE}s" >> "$DIR/service.log"
+        fi
+    fi
     screencap -p "$LATEST_PNG"
     if command -v convert >/dev/null 2>&1; then
         convert "$LATEST_PNG" -quality 35 "$LATEST" 2>/dev/null

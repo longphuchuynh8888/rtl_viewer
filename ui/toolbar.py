@@ -174,6 +174,7 @@ class TopToolbar(QWidget):
         self.main.append_log("Kenh: " + str(self.main.transport))
         if self.main.transport == "aws":
             self.main.apply_aws_settings()
+        self.main.worker.skip_auto = self.main.transport in ("aws", "http")
 
     def apply_aws_settings(self):
         self.on_url_chosen()
