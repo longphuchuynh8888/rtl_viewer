@@ -1,0 +1,1 @@
+C:\Users\longp\venv_mmo\venv_mmo\Scripts\activate && python c:\Users\longp\Downloads\rtl_viewer\main.py
