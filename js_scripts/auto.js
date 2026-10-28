@@ -9,16 +9,10 @@ const RULES_CONFIG = {
         {
             name: "Close Ad - Skip/Close/X",
             priority: 10,
-            logic: "OR",
+            logic: "AND",
             conditions: [
-                { prop: "text", op: "equals", value: "跳过" },
-                { prop: "text", op: "equals", value: "Skip" },
-                { prop: "text", op: "contains", value: "关闭" },
-                { prop: "text", op: "contains", value: "Close" },
-                { prop: "desc", op: "contains", value: "close" },
-                { prop: "desc", op: "contains", value: "skip" },
-                { prop: "id", op: "contains", value: "close" },
-                { prop: "id", op: "contains", value: "skip" }
+                { prop: "className", op: "equals", value: "android.widget.Button" },
+                { prop: "text", op: "equals", value: "Install" },
             ],
             action: "click",
             waitAfter: 800
