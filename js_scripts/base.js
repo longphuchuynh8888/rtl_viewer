@@ -5,7 +5,7 @@ auto.waitFor();
 const SCRIPT_URL = "https://raw.githubusercontent.com/longphuchuynh8888/rtl_viewer/refs/heads/main/js_scripts/auto.js"; 
 // Đổi thành link raw của bạn (GitHub, Gist, server của bạn...)
 const RELOAD_INTERVAL = 0; // 0 = chỉ tải 1 lần khi mở; >0 = reload lại sau X ms (ví dụ 300000 = 5 phút)
-const LOCAL_CACHE = "/sdcard/scripts/cache_game_ads.js";
+const LOCAL_CACHE = "/sdcard/scripts/auto.js";
 
 // ========== HÀM TẢI & CHẠY ==========
 function downloadAndRun() {
