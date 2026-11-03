@@ -1,0 +1,45 @@
+{
+    "dump_tasks": [
+        {
+            "name": "Nút Tắt Thông Báo PopUp Hệ Thống",
+            "search_by": "id",
+            "selector": "com.android.systemui:id/close_button",
+            "target_count": 1,
+            "conditions": {}
+        }
+    ],
+    "game_tasks": [
+        {
+            "name": "Bấm Bắn Chiêu Cuối Khi Đủ Năng Lượng",
+            "image_path": "/sdcard/Download/img/nut_chieu_thuc_ultimate.png",
+            "threshold": 0.82,
+            "target_count": 10,
+            "conditions": {
+                "type": "OR",
+                "children": [
+                    {
+                        "type": "AND",
+                        "children": [
+                            {
+                                "type": "ocr_contains",
+                                "bounds": [
+                                    708,
+                                    1106,
+                                    438,
+                                    113
+                                ],
+                                "expected_text": "MANA FULL"
+                            },
+                            {
+                                "type": "counter_matches",
+                                "counter_target": "dump_task_0",
+                                "operator": ">=",
+                                "value": 1
+                            }
+                        ]
+                    }
+                ]
+            }
+        }
+    ]
+}
